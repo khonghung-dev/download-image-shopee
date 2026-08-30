@@ -15,3 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Architecture Decision Record `0001-record-architecture-decisions.md`.
 - Core PySide6 application bootstrapping with minimal `MainWindow` titled "Shopee Image Downloader".
 - Basic test suite using `pytest`.
+- Main GUI layout with multiline input, folder selector, progress bar, and results table (Task 002).
+- URL input parser and Shopee Vietnam domain validator (Task 003).
+- Native output folder selector and persistent settings manager (Task 004).
+- Shopee URL resolver engine (`ShopeeUrlResolver`), tracking parameter sanitizer, `shop_id`/`item_id` extractor, and asynchronous `UrlResolverWorker` (`QThread`) with table status transitions (Task 005).
+

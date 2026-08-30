@@ -23,6 +23,6 @@ def test_main_window_initialization() -> None:
 
     window = MainWindow()
     assert window.windowTitle() == "Shopee Image Downloader"
-    assert window.width() == 800
-    assert window.height() == 600
+    assert window.width() == 850
+    assert window.height() == 650
     window.close()
