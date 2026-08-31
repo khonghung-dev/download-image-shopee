@@ -1,0 +1,9 @@
+{
+  "name": "com.shopee_image_downloader.bridge",
+  "description": "Shopee Image Downloader Native Bridge",
+  "path": "HOST_PATH_PLACEHOLDER",
+  "type": "stdio",
+  "allowed_origins": [
+    "chrome-extension://kjkgdknadhnpigglcpjbgkkbcngclhgf/"
+  ]
+}

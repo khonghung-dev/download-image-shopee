@@ -5,7 +5,9 @@
   "description": "Feasibility spike extension to extract Shopee product details and gallery images from the active tab.",
   "permissions": [
     "activeTab",
-    "scripting"
+    "scripting",
+    "nativeMessaging",
+    "tabs"
   ],
   "host_permissions": [
     "*://*.shopee.vn/*",
@@ -22,6 +24,9 @@
   "action": {
     "default_popup": "popup.html",
     "default_title": "Shopee Product Extractor"
+  },
+  "background": {
+    "service_worker": "background.js"
   },
   "content_scripts": [
     {

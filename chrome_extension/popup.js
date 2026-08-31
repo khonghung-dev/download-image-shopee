@@ -34,6 +34,13 @@
   const debugFinalCount = document.getElementById('debug-final-count');
   const galleryEmptyWarning = document.getElementById('gallery-empty-warning');
 
+  const bridgeStatusIndicator = document.getElementById('bridge-status-indicator');
+  const btnConnectBridge = document.getElementById('btn-connect-bridge');
+  const bridgeHelperNotice = document.getElementById('bridge-helper-notice');
+  const btnSendDesktop = document.getElementById('btn-send-desktop');
+  const btnSendText = document.getElementById('btn-send-text');
+  const btnSendIcon = document.getElementById('btn-send-icon');
+
   const btnCopy = document.getElementById('btn-copy');
   const btnCopyText = document.getElementById('btn-copy-text');
   const btnCopyIcon = document.getElementById('btn-copy-icon');
@@ -46,6 +53,124 @@
   let currentExtractedData = null;
   let activeTabId = null;
   let activeTabUrl = null;
+  let currentBridgeStatus = 'DISCONNECTED';
+
+  function updateBridgeStatusUI(status, isConnected, message, wasConnectedBefore, hostInstalled = true) {
+    if (status) {
+      currentBridgeStatus = status;
+    } else {
+      currentBridgeStatus = isConnected ? 'CONNECTED' : 'DISCONNECTED';
+    }
+
+    const isHostMissing = (hostInstalled === false || (message && message.includes('Native Host chưa được cài đặt')));
+    const isLostConnection = (!isHostMissing && currentBridgeStatus === 'DISCONNECTED' && (wasConnectedBefore || (message && message.includes('Mất kết nối'))));
+
+    if (bridgeStatusIndicator) {
+      if (currentBridgeStatus === 'CONNECTED') {
+        bridgeStatusIndicator.textContent = 'Đã kết nối';
+        bridgeStatusIndicator.className = 'bridge-status-val status-connected';
+      } else if (currentBridgeStatus === 'CONNECTING') {
+        bridgeStatusIndicator.textContent = 'Đang kết nối...';
+        bridgeStatusIndicator.className = 'bridge-status-val status-connecting';
+      } else if (isLostConnection) {
+        bridgeStatusIndicator.textContent = 'Mất kết nối';
+        bridgeStatusIndicator.className = 'bridge-status-val status-disconnected';
+      } else {
+        bridgeStatusIndicator.textContent = 'Chưa kết nối';
+        bridgeStatusIndicator.className = 'bridge-status-val status-disconnected';
+      }
+    }
+
+    if (btnConnectBridge) {
+      if (currentBridgeStatus === 'CONNECTED') {
+        btnConnectBridge.style.display = 'none';
+      } else if (currentBridgeStatus === 'CONNECTING') {
+        btnConnectBridge.style.display = 'inline-flex';
+        btnConnectBridge.textContent = 'Đang kết nối...';
+        btnConnectBridge.disabled = true;
+      } else if (isLostConnection) {
+        btnConnectBridge.style.display = 'inline-flex';
+        btnConnectBridge.textContent = 'Kết nối lại';
+        btnConnectBridge.disabled = false;
+      } else {
+        btnConnectBridge.style.display = 'inline-flex';
+        btnConnectBridge.textContent = 'Kết nối ứng dụng';
+        btnConnectBridge.disabled = false;
+      }
+    }
+
+    if (bridgeHelperNotice) {
+      if (currentBridgeStatus === 'CONNECTED' || currentBridgeStatus === 'CONNECTING') {
+        bridgeHelperNotice.classList.add('hidden');
+      } else if (isHostMissing) {
+        bridgeHelperNotice.classList.remove('hidden');
+        bridgeHelperNotice.textContent = 'Native Host chưa được cài đặt.';
+      } else if (isLostConnection) {
+        bridgeHelperNotice.classList.remove('hidden');
+        bridgeHelperNotice.textContent = message || 'Mất kết nối với Desktop. Hãy mở ứng dụng rồi nhấn "Kết nối lại".';
+      } else {
+        bridgeHelperNotice.classList.remove('hidden');
+        bridgeHelperNotice.textContent = message || 'Desktop chưa kết nối. Hãy mở ứng dụng rồi nhấn "Kết nối ứng dụng".';
+      }
+    }
+
+    updateSendButtonState();
+  }
+
+  function updateSendButtonState() {
+    if (!btnSendDesktop) return;
+    const isScanComplete = !!(
+      currentExtractedData &&
+      (currentExtractedData.extraction_status === 'COMPLETE' ||
+       (currentExtractedData.debug && currentExtractedData.debug.temporary_scan_status === 'COMPLETE'))
+    );
+    const isConnected = currentBridgeStatus === 'CONNECTED';
+
+    btnSendDesktop.disabled = !(isScanComplete && isConnected);
+
+    if (!isConnected) {
+      btnSendDesktop.title = 'Vui lòng kết nối ứng dụng trước.';
+    } else if (!isScanComplete) {
+      btnSendDesktop.title = 'Vui lòng đợi quét hoàn tất bộ sưu tập ảnh.';
+    } else {
+      btnSendDesktop.title = 'Gửi dữ liệu sản phẩm sang Desktop App';
+    }
+  }
+
+  function queryBridgeStatus() {
+    if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
+      chrome.runtime.sendMessage({ action: 'GET_BRIDGE_STATUS' }, (response) => {
+        if (!chrome.runtime.lastError && response) {
+          updateBridgeStatusUI(response.status, response.connected, response.message, response.wasConnectedBefore, response.hostInstalled);
+        } else {
+          updateBridgeStatusUI('DISCONNECTED', false, '', false, false);
+        }
+      });
+    }
+  }
+
+  // Handle manual connect button
+  if (btnConnectBridge) {
+    btnConnectBridge.addEventListener('click', () => {
+      updateBridgeStatusUI('CONNECTING', false);
+      if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
+        chrome.runtime.sendMessage({ action: 'CONNECT_DESKTOP' }, (response) => {
+          if (!chrome.runtime.lastError && response) {
+            updateBridgeStatusUI(response.status, response.connected, response.message, response.wasConnectedBefore, response.hostInstalled);
+          }
+        });
+      }
+    });
+  }
+
+  // Listen for bridge status broadcasts from background
+  if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
+    chrome.runtime.onMessage.addListener((msg) => {
+      if (msg && msg.action === 'BRIDGE_STATUS_CHANGED') {
+        updateBridgeStatusUI(msg.status, msg.connected, msg.message, msg.wasConnectedBefore, msg.hostInstalled);
+      }
+    });
+  }
 
   function showView(viewName) {
     stateLoading.classList.add('hidden');
@@ -170,6 +295,7 @@
       resUrlsList.textContent = 'Không có URL ảnh hợp lệ.';
     }
 
+    updateSendButtonState();
     showView('success');
   }
 
@@ -220,6 +346,61 @@
       errorMessage.textContent = err.message || String(err);
       showView('error');
     }
+  }
+
+  // Send to Desktop button handler
+  if (btnSendDesktop) {
+    btnSendDesktop.addEventListener('click', () => {
+      if (currentBridgeStatus !== 'CONNECTED') {
+        alert('Vui lòng kết nối ứng dụng Desktop trước.');
+        return;
+      }
+      if (!currentExtractedData) return;
+      const isComplete = (
+        currentExtractedData.extraction_status === 'COMPLETE' ||
+        (currentExtractedData.debug && currentExtractedData.debug.temporary_scan_status === 'COMPLETE')
+      );
+      if (!isComplete) return;
+
+      const originalText = btnSendText.textContent;
+      const originalIcon = btnSendIcon.textContent;
+
+      btnSendDesktop.disabled = true;
+      btnSendText.textContent = 'Đang gửi...';
+
+      chrome.runtime.sendMessage({
+        action: 'SEND_PRODUCT_TO_DESKTOP',
+        tabId: activeTabId,
+        url: activeTabUrl,
+        payload: {
+          url: currentExtractedData.url,
+          product_name: currentExtractedData.product_name,
+          shop_id: currentExtractedData.shop_id,
+          item_id: currentExtractedData.item_id,
+          images: currentExtractedData.images,
+          image_count: currentExtractedData.images.length
+        }
+      }, (response) => {
+        if (!chrome.runtime.lastError && response && response.success) {
+          btnSendDesktop.classList.add('sent');
+          btnSendText.textContent = 'Đã gửi sang ứng dụng!';
+          btnSendIcon.textContent = '✓';
+
+          setTimeout(() => {
+            btnSendDesktop.classList.remove('sent');
+            btnSendText.textContent = originalText;
+            btnSendIcon.textContent = originalIcon;
+            updateSendButtonState();
+          }, 2000);
+        } else {
+          const errText = (response && response.error) || 'Không thể gửi đến ứng dụng Desktop.';
+          alert(errText + '\nVui lòng kiểm tra ứng dụng Desktop (127.0.0.1:8765) đang chạy.');
+          btnSendText.textContent = originalText;
+          btnSendIcon.textContent = originalIcon;
+          updateSendButtonState();
+        }
+      });
+    });
   }
 
   // Copy to clipboard handler
@@ -278,6 +459,7 @@
    */
   async function init() {
     showView('loading');
+    queryBridgeStatus();
 
     try {
       if (typeof chrome === 'undefined' || !chrome.tabs) {
@@ -311,3 +493,4 @@
 
   document.addEventListener('DOMContentLoaded', init);
 })();
+

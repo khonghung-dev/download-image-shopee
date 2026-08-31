@@ -182,6 +182,118 @@
     }
 
     /* Action button */
+    .btn-send {
+      background-color: #2563eb;
+      color: #ffffff;
+      border: none;
+      border-radius: 6px;
+      padding: 10px 14px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      transition: background-color 0.15s ease, transform 0.05s ease, opacity 0.15s ease;
+      width: 100%;
+    }
+
+    .btn-send:hover:not(:disabled) {
+      background-color: #1d4ed8;
+    }
+
+    .btn-send:active:not(:disabled) {
+      transform: scale(0.99);
+    }
+
+    .btn-send:disabled {
+      background-color: #94a3b8;
+      cursor: not-allowed;
+      opacity: 0.65;
+    }
+
+    .btn-send.sent {
+      background-color: var(--success);
+    }
+
+    .bridge-status-row {
+      font-size: 11px;
+      margin-top: 2px;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .bridge-status-label {
+      opacity: 0.85;
+      font-weight: 500;
+    }
+
+    .bridge-status-val {
+      font-weight: 700;
+      padding: 1px 6px;
+      border-radius: 4px;
+      background: rgba(255, 255, 255, 0.2);
+    }
+
+    .bridge-status-val.status-connected {
+      background: #10b981;
+      color: #ffffff;
+    }
+
+    .bridge-status-val.status-connecting {
+      background: #f59e0b;
+      color: #ffffff;
+    }
+
+    .bridge-status-val.status-disconnected {
+      background: rgba(0, 0, 0, 0.25);
+      color: #ffdddd;
+    }
+
+    .btn-bridge-connect {
+      background: rgba(255, 255, 255, 0.25);
+      border: 1px solid rgba(255, 255, 255, 0.4);
+      color: #ffffff;
+      font-size: 11px;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 4px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      transition: background-color 0.15s ease;
+      white-space: nowrap;
+    }
+
+    .btn-bridge-connect:hover:not(:disabled) {
+      background: rgba(255, 255, 255, 0.4);
+    }
+
+    .btn-bridge-connect:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+
+    .bridge-helper-notice {
+      background: #eff6ff;
+      border: 1px solid #bfdbfe;
+      color: #1e40af;
+      padding: 8px 10px;
+      border-radius: 6px;
+      font-size: 11px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .bridge-helper-notice.hidden {
+      display: none !important;
+    }
+
     .btn-copy {
       background-color: var(--primary);
       color: #ffffff;
@@ -341,9 +453,17 @@
 </head>
 <body>
   <div class="header">
-    <h1>Shopee Product Extractor</h1>
-    <span class="tag">006X Spike</span>
+    <div style="display: flex; flex-direction: column; gap: 3px;">
+      <h1>Shopee Product Extractor</h1>
+      <div class="bridge-status-row">
+        <span class="bridge-status-label">Desktop:</span>
+        <span id="bridge-status-indicator" class="bridge-status-val status-disconnected">Chưa kết nối</span>
+        <button id="btn-connect-bridge" class="btn-bridge-connect" type="button">Kết nối ứng dụng</button>
+      </div>
+    </div>
+    <span class="tag">006N Native Bridge</span>
   </div>
+
 
   <div class="content">
     <!-- Loading state -->
@@ -460,6 +580,17 @@
           <strong>Không thể xác định chính xác bộ ảnh sản phẩm.</strong>
         </div>
       </div>
+
+      <!-- Helper Notice when disconnected -->
+      <div id="bridge-helper-notice" class="bridge-helper-notice hidden">
+        <span>Desktop chưa kết nối. Vui lòng nhấn "Kết nối ứng dụng".</span>
+      </div>
+
+      <!-- Main Action: Send to Desktop App -->
+      <button id="btn-send-desktop" class="btn-send" type="button" disabled title="Vui lòng kết nối ứng dụng trước.">
+        <span id="btn-send-icon">🚀</span>
+        <span id="btn-send-text">Gửi sang ứng dụng</span>
+      </button>
 
       <div style="display: flex; gap: 8px;">
         <button id="btn-copy" class="btn-copy" type="button" style="flex: 1;">

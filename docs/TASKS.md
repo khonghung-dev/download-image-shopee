@@ -13,7 +13,9 @@ This document tracks development milestones, specifications, and execution statu
 | **005** | Shopee URL Resolver | [x] Complete | [005-shopee-url-resolver.md](file:///d:/download-picture-shopee/docs/specs/005-shopee-url-resolver.md) |
 | **006** | Product Metadata Extractor | [x] Complete | [006-product-metadata-extractor.md](file:///d:/download-picture-shopee/docs/specs/006-product-metadata-extractor.md) |
 | **006A**| Shopee Authentication & Persistent Session | [x] Complete | [006a-shopee-auth-session.md](file:///d:/download-picture-shopee/docs/specs/006a-shopee-auth-session.md) |
-| **006X**| Chrome Extension Shopee Extraction Spike | [x] Complete | [006x-chrome-extension-spike.md](file:///d:/download-picture-shopee/docs/specs/006x-chrome-extension-spike.md) |
+| **006Y**| Chrome Extension ↔ PySide6 Desktop Bridge (Deprecated / Disabled) | [x] Deprecated | [006y-extension-desktop-bridge.md](file:///d:/download-picture-shopee/docs/specs/006y-extension-desktop-bridge.md) |
+| **006N**| Chrome Native Messaging Bridge | [x] Complete | [006n-native-messaging-bridge.md](file:///d:/download-picture-shopee/docs/specs/006n-native-messaging-bridge.md) |
+| **006Z**| Desktop Batch URL Queue → Chrome Extension Worker | [x] Complete | [006z-batch-url-queue.md](file:///d:/download-picture-shopee/docs/specs/006z-batch-url-queue.md) |
 | **007** | Image Download Engine & Extraction | [ ] Planned | - |
 | **008** | Progress Feedback & Batch Reporting | [ ] Planned | - |
 | **009** | Packaging & Windows Executable Distribution | [ ] Planned | - |
@@ -112,4 +114,44 @@ This document tracks development milestones, specifications, and execution statu
   - [x] Extension popup in [chrome_extension/popup.html](file:///d:/download-picture-shopee/chrome_extension/popup.html) & [chrome_extension/popup.js](file:///d:/download-picture-shopee/chrome_extension/popup.js) with product details display, image count, thumbnail preview, JSON clipboard copy, and non-Shopee tab detection.
   - [x] Manual installation and testing guide in [chrome_extension/README.md](file:///d:/download-picture-shopee/chrome_extension/README.md).
   - [x] Isolated unit test suite in [tests/test_extension_extractor.py](file:///d:/download-picture-shopee/tests/test_extension_extractor.py).
+
+### Task 006Y: Chrome Extension ↔ PySide6 Desktop Bridge
+- **Goal**: Establish a local loopback WebSocket communication bridge connecting the Chrome Extension to the PySide6 desktop application so that authoritative `COMPLETE` product extraction results can be transmitted from the browser to the desktop UI upon clicking "Gửi sang ứng dụng".
+- **Deliverables**:
+  - [x] Specification document in [006y-extension-desktop-bridge.md](file:///d:/download-picture-shopee/docs/specs/006y-extension-desktop-bridge.md).
+  - [x] Versioned JSON bridge protocol & data models in [src/shopee_image_downloader/core/bridge_protocol.py](file:///d:/download-picture-shopee/src/shopee_image_downloader/core/bridge_protocol.py).
+  - [x] Event-driven loopback WebSocket server in [src/shopee_image_downloader/workers/bridge_worker.py](file:///d:/download-picture-shopee/src/shopee_image_downloader/workers/bridge_worker.py) binding strictly to `127.0.0.1:8765`.
+  - [x] Desktop UI connection status (`🔴 Chưa kết nối` / `🟢 Đã kết nối` / `🔴 Mất kết nối`) and results table integration with `shop_id + item_id` deduplication in [src/shopee_image_downloader/ui/main_window.py](file:///d:/download-picture-shopee/src/shopee_image_downloader/ui/main_window.py).
+  - [x] Chrome Extension background service worker in [chrome_extension/background.js](file:///d:/download-picture-shopee/chrome_extension/background.js) with bounded exponential backoff reconnection.
+  - [x] Chrome Extension popup status indicator (`Desktop: Đã kết nối` / `Desktop: Chưa kết nối`) and `"Gửi sang ứng dụng"` action button in [chrome_extension/popup.html](file:///d:/download-picture-shopee/chrome_extension/popup.html) & [chrome_extension/popup.js](file:///d:/download-picture-shopee/chrome_extension/popup.js).
+
+### Task 006N: Chrome Native Messaging Bridge
+- **Goal**: Migrate the desktop communication transport for the Chrome Extension from direct Chrome WebSockets to Chrome Native Messaging (`com.shopee_image_downloader.bridge`), routing through a dedicated Native Host executable (`shopee_native_host.exe`) connecting to the PySide6 loopback WebSocket server (`127.0.0.1:8765`), eliminating browser-level connection error logging when the desktop app is offline.
+- **Deliverables**:
+  - [x] Specification document in [006n-native-messaging-bridge.md](file:///d:/download-picture-shopee/docs/specs/006n-native-messaging-bridge.md).
+  - [x] Native host implementation in [native_host/host.py](file:///d:/download-picture-shopee/native_host/host.py) with 4-byte length prefix stdio framing and binary stream safety.
+  - [x] Standard library RFC 6455 WebSocket client in [native_host/ws_client.py](file:///d:/download-picture-shopee/native_host/ws_client.py) without heavy runtime dependencies.
+  - [x] Native host manifest template in [native_host/com.shopee_image_downloader.bridge.json.template](file:///d:/download-picture-shopee/native_host/com.shopee_image_downloader.bridge.json.template) with exact allowed origin (`chrome-extension://kjkgdknadhnpigglcpjbgkkbcngclhgf/`).
+  - [x] Standalone executable build script [native_host/build_host.ps1](file:///d:/download-picture-shopee/native_host/build_host.ps1) generating `dist/shopee_native_host.exe` via PyInstaller.
+  - [x] HKCU-only registry registration script [native_host/install_host.ps1](file:///d:/download-picture-shopee/native_host/install_host.ps1) and removal script [native_host/uninstall_host.ps1](file:///d:/download-picture-shopee/native_host/uninstall_host.ps1).
+  - [x] Chrome Extension Manifest V3 updated with `"nativeMessaging"` permission in [chrome_extension/manifest.json](file:///d:/download-picture-shopee/chrome_extension/manifest.json).
+  - [x] Chrome Extension background service worker migrated to `chrome.runtime.connectNative` in [chrome_extension/background.js](file:///d:/download-picture-shopee/chrome_extension/background.js) with zero direct WebSocket calls in active source code.
+  - [x] Chrome Extension popup status indicator and send action integrated with native bridge status in [chrome_extension/popup.js](file:///d:/download-picture-shopee/chrome_extension/popup.js).
+  - [x] Comprehensive automated test suite in [tests/test_native_messaging.py](file:///d:/download-picture-shopee/tests/test_native_messaging.py) and [tests/test_extension_extractor.py](file:///d:/download-picture-shopee/tests/test_extension_extractor.py).
+
+### Task 006Z: Desktop Batch URL Queue → Chrome Extension Worker (Architecturally Unified)
+- **Goal**: Implement the end-to-end batch workflow connecting PySide6 desktop multiline input to the Chrome Extension background worker using a single authoritative scanner (`content.js` + `extractor_core.js`), a single immutable snapshot schema (`ProductSnapshotV1`), a single background sender (`sendProductSnapshotToDesktop`), and a single deduplicated desktop row identity policy (`_rows_by_request_id` + `_rows_by_product_key`).
+- **Deliverables**:
+  - [x] Specification document in [006z-batch-url-queue.md](file:///d:/download-picture-shopee/docs/specs/006z-batch-url-queue.md).
+  - [x] Bridge protocol expansion (`process_url`, `process_progress`, `process_error`, `cancel_processing`, `verification_required`) in [src/shopee_image_downloader/core/bridge_protocol.py](file:///d:/download-picture-shopee/src/shopee_image_downloader/core/bridge_protocol.py).
+  - [x] WebSocket bridge server broadcasting and signal routing in [src/shopee_image_downloader/workers/bridge_worker.py](file:///d:/download-picture-shopee/src/shopee_image_downloader/workers/bridge_worker.py).
+  - [x] Stateful `BatchQueueManager` with FIFO item execution, timeout handling, request correlation, verification pause/resume, and cancellation in [src/shopee_image_downloader/core/batch_queue.py](file:///d:/download-picture-shopee/src/shopee_image_downloader/core/batch_queue.py).
+  - [x] Desktop `MainWindow` integration with batch action button states (`Bắt đầu tải ảnh`, `Hủy`, `Tiếp tục`), progress bar, bridge connection guard, and live table updates in [src/shopee_image_downloader/ui/main_window.py](file:///d:/download-picture-shopee/src/shopee_image_downloader/ui/main_window.py).
+  - [x] Desktop row identity and deduplication indexes (`_rows_by_request_id` and `_rows_by_product_key`) preventing duplicate row creation between batch and manual sends.
+  - [x] Chrome Extension content script RPC boundary (`PING_SCANNER`, `RUN_FULL_SCAN`, `GET_COMPLETE_SNAPSHOT`) executing verified 006X gallery extraction in [chrome_extension/content.js](file:///d:/download-picture-shopee/chrome_extension/content.js).
+  - [x] Chrome Extension background service worker dedicated worker tab management, RPC invocation, and single canonical sender (`sendProductSnapshotToDesktop`) in [chrome_extension/background.js](file:///d:/download-picture-shopee/chrome_extension/background.js).
+  - [x] Comprehensive test suite (Cases A through F) in [tests/test_batch_queue.py](file:///d:/download-picture-shopee/tests/test_batch_queue.py), [tests/test_bridge_protocol.py](file:///d:/download-picture-shopee/tests/test_bridge_protocol.py), [tests/test_ui.py](file:///d:/download-picture-shopee/tests/test_ui.py), and [tests/test_extension_extractor.py](file:///d:/download-picture-shopee/tests/test_extension_extractor.py).
+
+
+
 

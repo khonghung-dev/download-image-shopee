@@ -54,6 +54,30 @@
     /^data:image/i
   ];
 
+  const GalleryBoundaryState = Object.freeze({
+    UNKNOWN: 'UNKNOWN',
+    CONFIRMED: 'CONFIRMED'
+  });
+
+  const GalleryCompletenessReason = Object.freeze({
+    CAROUSEL_BOUNDS_CONFIRMED: 'CAROUSEL_BOUNDS_CONFIRMED',
+    STABLE_SINGLE_PAGE: 'STABLE_SINGLE_PAGE',
+    NOT_COMPLETE: 'NOT_COMPLETE'
+  });
+
+  const GalleryControlState = Object.freeze({
+    MISSING: 'MISSING',
+    ACTIVE: 'ACTIVE',
+    INACTIVE: 'INACTIVE'
+  });
+
+  // A no-arrow gallery is authoritative only after this mutation-aware quiet window.
+  // This is a stability threshold, not a pre-scan delay: any relevant gallery mutation
+  // or ordered-media/control change resets the window immediately.
+  const GALLERY_STABILITY_CONFIG = Object.freeze({
+    SETTLE_WINDOW_MS: 1000
+  });
+
   /**
    * Check if a given URL belongs to a supported Shopee domain.
    * @param {string} url
@@ -785,36 +809,48 @@
     return null;
   }
 
-  /**
-   * Checks if the right arrow button can advance and triggers a click.
-   *
-   * @param {Element} container
-   * @returns {boolean} True if advanced successfully
-   */
-  function advanceCarousel(container) {
-    const btn = getCarouselRightButton(container);
-    if (!btn) return false;
-
-    // Check if disabled or hidden
-    if (btn.disabled) return false;
-    if (btn.getAttribute && btn.getAttribute('aria-disabled') === 'true') return false;
-
-    const style = (btn.getAttribute ? btn.getAttribute('style') : btn.style) || '';
-    if (typeof style === 'string' && (style.includes('display: none') || style.includes('visibility: hidden'))) {
-      return false;
+  function getCarouselControlState(button) {
+    if (!button) return GalleryControlState.MISSING;
+    if (button.disabled) return GalleryControlState.INACTIVE;
+    if (button.getAttribute && button.getAttribute('aria-disabled') === 'true') {
+      return GalleryControlState.INACTIVE;
     }
 
-    // Trigger click
+    const style = (button.getAttribute ? button.getAttribute('style') : button.style) || '';
+    if (typeof style === 'string' && (
+      style.includes('display: none') || style.includes('visibility: hidden')
+    )) {
+      return GalleryControlState.INACTIVE;
+    }
+    return GalleryControlState.ACTIVE;
+  }
+
+  function clickCarouselButton(button) {
+    if (getCarouselControlState(button) !== GalleryControlState.ACTIVE) return false;
     try {
-      if (typeof btn.click === 'function') {
-        btn.click();
-      } else if (typeof btn.dispatchEvent === 'function') {
-        btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+      if (typeof button.click === 'function') {
+        button.click();
+        return true;
       }
-      return true;
+      if (typeof button.dispatchEvent === 'function' && typeof MouseEvent !== 'undefined') {
+        button.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+        return true;
+      }
     } catch {
       return false;
     }
+    return false;
+  }
+
+  /**
+   * Checks if the right arrow button can advance and triggers a click.
+   * A false return means only that no click occurred; it is never boundary proof.
+   *
+   * @param {Element} container
+   * @returns {boolean} True if a click was dispatched successfully
+   */
+  function advanceCarousel(container) {
+    return clickCarouselButton(getCarouselRightButton(container));
   }
 
   /**
@@ -826,12 +862,188 @@
     return new Promise(resolve => setTimeout(resolve, ms));
   }
 
+  function captureGalleryObservation(container) {
+    const mediaItems = getVisibleGalleryItems(container);
+    return {
+      mediaItems: mediaItems,
+      mediaIdentities: mediaItems.map(item => `${item.type}:${item.identity}`),
+      leftControl: getCarouselControlState(getCarouselLeftButton(container)),
+      rightControl: getCarouselControlState(getCarouselRightButton(container))
+    };
+  }
+
+  function createGalleryStabilitySession(options = {}) {
+    const settleWindowMs = Number.isFinite(options.settleWindowMs)
+      ? Math.max(0, options.settleWindowMs)
+      : GALLERY_STABILITY_CONFIG.SETTLE_WINDOW_MS;
+    const now = typeof options.now === 'function' ? options.now : () => Date.now();
+    const ObserverCtor = options.MutationObserver || (
+      typeof MutationObserver !== 'undefined' ? MutationObserver : null
+    );
+    const expectedProductKey = options.expectedProductKey || '';
+
+    let documentRef = options.documentRef || null;
+    let observedContainer = null;
+    let observer = null;
+    let closed = false;
+    let lastSignature = '';
+    let lastObservation = null;
+    let stableSince = 0;
+    let mutationPending = false;
+    const waiters = new Set();
+
+    function wakeWaiters(reason) {
+      for (const waiter of Array.from(waiters)) {
+        waiters.delete(waiter);
+        waiter(reason);
+      }
+    }
+
+    function disconnectObserver() {
+      if (observer) {
+        try {
+          observer.disconnect();
+        } catch {}
+      }
+      observer = null;
+    }
+
+    function resetForContainer(container) {
+      disconnectObserver();
+      observedContainer = container;
+      lastSignature = '';
+      lastObservation = null;
+      stableSince = now();
+      mutationPending = false;
+
+      if (!ObserverCtor || !container) return;
+      observer = new ObserverCtor(() => {
+        if (closed || observedContainer !== container) return;
+        mutationPending = true;
+        stableSince = now();
+
+        let currentObservation = null;
+        try {
+          currentObservation = captureGalleryObservation(container);
+        } catch {}
+        const arrowsChanged = !!(
+          currentObservation && lastObservation && (
+            currentObservation.leftControl !== lastObservation.leftControl ||
+            currentObservation.rightControl !== lastObservation.rightControl
+          )
+        );
+        const mediaCount = currentObservation ? currentObservation.mediaIdentities.length : 0;
+        console.log(
+          `[GALLERY]\nmutation detected\nmedia=${mediaCount}\narrowsChanged=${arrowsChanged}\nstability reset`
+        );
+        wakeWaiters('mutation');
+      });
+      observer.observe(container, {
+        subtree: true,
+        childList: true,
+        attributes: true,
+        attributeFilter: [
+          'src', 'srcset', 'data-src', 'data-original', 'data-lazy-src',
+          'class', 'style', 'disabled', 'aria-disabled'
+        ]
+      });
+    }
+
+    function inspect({ container, doc, productKey }) {
+      if (closed) {
+        return { stable: false, aborted: true, reason: 'SESSION_CLOSED' };
+      }
+      if (!documentRef) documentRef = doc;
+      if (documentRef && doc !== documentRef) {
+        return { stable: false, aborted: true, reason: 'DOCUMENT_CHANGED' };
+      }
+      if (expectedProductKey && productKey !== expectedProductKey) {
+        return { stable: false, aborted: true, reason: 'PRODUCT_CHANGED' };
+      }
+      if (doc && doc.visibilityState && doc.visibilityState !== 'visible') {
+        stableSince = now();
+        return { stable: false, aborted: false, reason: 'DOCUMENT_HIDDEN' };
+      }
+      if (observedContainer !== container) resetForContainer(container);
+
+      const observation = captureGalleryObservation(container);
+      const signature = JSON.stringify([
+        observation.mediaIdentities,
+        observation.leftControl,
+        observation.rightControl
+      ]);
+      const changed = mutationPending || signature !== lastSignature;
+      if (changed) {
+        lastSignature = signature;
+        lastObservation = observation;
+        stableSince = now();
+        mutationPending = false;
+      }
+
+      const noArrows = (
+        observation.leftControl === GalleryControlState.MISSING &&
+        observation.rightControl === GalleryControlState.MISSING
+      );
+      const stable = (
+        noArrows &&
+        observation.mediaIdentities.length > 0 &&
+        now() - stableSince >= settleWindowMs
+      );
+
+      console.log(
+        `[GALLERY]\nmedia=${observation.mediaIdentities.length}` +
+        `\nleftBoundary=${stable ? GalleryBoundaryState.CONFIRMED : GalleryBoundaryState.UNKNOWN}` +
+        `\nrightBoundary=${stable ? GalleryBoundaryState.CONFIRMED : GalleryBoundaryState.UNKNOWN}` +
+        `\nstable=${stable}\nquality=${stable ? 'COMPLETE' : 'PARTIAL'}`
+      );
+
+      return {
+        stable: stable,
+        aborted: false,
+        reason: stable ? GalleryCompletenessReason.STABLE_SINGLE_PAGE : GalleryCompletenessReason.NOT_COMPLETE,
+        observation: observation,
+        stableForMs: Math.max(0, now() - stableSince)
+      };
+    }
+
+    function waitForRelevantChange(timeoutMs) {
+      if (closed) return Promise.resolve('closed');
+      return new Promise(resolve => {
+        let settled = false;
+        const finish = reason => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timerId);
+          waiters.delete(finish);
+          resolve(reason);
+        };
+        const timerId = setTimeout(() => finish('timeout'), Math.max(0, timeoutMs));
+        waiters.add(finish);
+      });
+    }
+
+    function disconnect() {
+      if (closed) return;
+      closed = true;
+      disconnectObserver();
+      wakeWaiters('disconnected');
+      observedContainer = null;
+    }
+
+    return {
+      inspect,
+      waitForRelevantChange,
+      disconnect,
+      settleWindowMs
+    };
+  }
+
   /**
    * Normalizes the gallery carousel by repeatedly moving LEFT until confirmed at the beginning.
    *
    * @param {Element} container
    * @param {{advanceDelayMs?: number, maxLeftAdvances?: number}} options
-   * @returns {Promise<{leftmostReached: boolean, leftAdvances: number}>}
+   * @returns {Promise<{leftBoundary: string, leftAdvances: number}>}
    */
   async function rewindCarouselToBeginning(container, options = {}) {
     const delayMs = options.advanceDelayMs !== undefined ? options.advanceDelayMs : 50;
@@ -839,6 +1051,8 @@
 
     let leftAdvances = 0;
     let noShiftStreak = 0;
+    let leftBoundary = GalleryBoundaryState.UNKNOWN;
+    let leftControlObserved = false;
 
     function getLeftmostId() {
       const items = getVisibleGalleryItems(container);
@@ -849,30 +1063,28 @@
 
     while (leftAdvances < maxLeftAdvances) {
       const leftBtn = getCarouselLeftButton(container);
-      if (!leftBtn) {
-        // No left button exists (already at start or single-page)
-        break;
-      }
+      const leftControl = getCarouselControlState(leftBtn);
+      const rightControl = getCarouselControlState(getCarouselRightButton(container));
 
-      if (leftBtn.disabled || (leftBtn.getAttribute && leftBtn.getAttribute('aria-disabled') === 'true')) {
-        break;
-      }
-
-      const style = (leftBtn.getAttribute ? leftBtn.getAttribute('style') : leftBtn.style) || '';
-      if (typeof style === 'string' && (style.includes('display: none') || style.includes('visibility: hidden'))) {
-        break;
-      }
-
-      // Trigger click on left arrow
-      try {
-        if (typeof leftBtn.click === 'function') {
-          leftBtn.click();
-        } else if (typeof leftBtn.dispatchEvent === 'function') {
-          leftBtn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+      if (leftControl === GalleryControlState.MISSING) {
+        // Absence alone is not proof. It becomes proof only when the opposite
+        // control is observed or an actual left traversal has already occurred.
+        if (
+          rightControl !== GalleryControlState.MISSING ||
+          leftControlObserved ||
+          leftAdvances > 0
+        ) {
+          leftBoundary = GalleryBoundaryState.CONFIRMED;
         }
-      } catch {
         break;
       }
+      leftControlObserved = true;
+      if (leftControl === GalleryControlState.INACTIVE) {
+        leftBoundary = GalleryBoundaryState.CONFIRMED;
+        break;
+      }
+
+      if (!clickCarouselButton(leftBtn)) break;
 
       leftAdvances++;
 
@@ -884,7 +1096,9 @@
       if (currentFirstId === prevFirstId) {
         noShiftStreak++;
         if (noShiftStreak >= 2) {
-          // Reached leftmost position
+          // Two proven control interactions with an unchanged ordered first item
+          // confirm the behavioral left boundary; arrow absence is not involved.
+          leftBoundary = GalleryBoundaryState.CONFIRMED;
           break;
         }
       } else {
@@ -894,7 +1108,7 @@
     }
 
     return {
-      leftmostReached: true,
+      leftBoundary: leftBoundary,
       leftAdvances: leftAdvances
     };
   }
@@ -904,8 +1118,8 @@
    * and advancing rightward until the end.
    *
    * @param {Element} galleryContainer
-   * @param {{advanceDelayMs?: number, maxAdvances?: number}} options
-   * @returns {Promise<{initialVisibleCount: number, carouselLeftAdvances: number, carouselRightAdvances: number, leftmostReached: boolean, rightmostReached: boolean, totalDiscoveredCount: number, imageMediaCount: number, videoMediaCount: number, unknownMediaCount: number, images: string[], scanQuality: 'COMPLETE'|'PARTIAL'|'FAILED'}>}
+   * @param {{advanceDelayMs?: number, maxAdvances?: number, galleryStabilitySession?: object, documentRef?: Document, productKey?: string}} options
+   * @returns {Promise<object>}
    */
   async function enumerateCompleteGallery(galleryContainer, options = {}) {
     const advanceDelay = options.advanceDelayMs !== undefined ? options.advanceDelayMs : 60;
@@ -915,6 +1129,8 @@
       initialVisibleCount: 0,
       carouselLeftAdvances: 0,
       carouselRightAdvances: 0,
+      leftBoundary: GalleryBoundaryState.UNKNOWN,
+      rightBoundary: GalleryBoundaryState.UNKNOWN,
       leftmostReached: false,
       rightmostReached: false,
       totalDiscoveredCount: 0,
@@ -922,15 +1138,80 @@
       videoMediaCount: 0,
       unknownMediaCount: 0,
       images: [],
-      scanQuality: 'FAILED'
+      scanQuality: 'FAILED',
+      completenessReason: GalleryCompletenessReason.NOT_COMPLETE,
+      navigationChanged: false
     };
 
     if (!galleryContainer) return emptyResult;
 
+    const firstObservation = captureGalleryObservation(galleryContainer);
+    const initiallyNoArrows = (
+      firstObservation.leftControl === GalleryControlState.MISSING &&
+      firstObservation.rightControl === GalleryControlState.MISSING
+    );
+
+    // Missing controls are UNKNOWN until a scoped stability session proves that
+    // the canonical gallery is a stable single page.
+    if (initiallyNoArrows) {
+      const session = options.galleryStabilitySession;
+      const stability = session ? session.inspect({
+        container: galleryContainer,
+        doc: options.documentRef || null,
+        productKey: options.productKey || ''
+      }) : {
+        stable: false,
+        aborted: false,
+        reason: GalleryCompletenessReason.NOT_COMPLETE,
+        observation: firstObservation
+      };
+
+      const observedItems = stability.observation?.mediaItems || firstObservation.mediaItems;
+      const rawImages = [];
+      let imageCount = 0;
+      let videoCount = 0;
+      let unknownCount = 0;
+      observedItems.forEach(item => {
+        if (item.type === 'IMAGE') {
+          imageCount++;
+          if (item.rawUrl) rawImages.push(item.rawUrl);
+        } else if (item.type === 'VIDEO') {
+          videoCount++;
+        } else {
+          unknownCount++;
+        }
+      });
+      const images = deduplicateGalleryImages(rawImages);
+      const isStableSinglePage = stability.stable && images.length > 0;
+      const boundary = isStableSinglePage
+        ? GalleryBoundaryState.CONFIRMED
+        : GalleryBoundaryState.UNKNOWN;
+
+      return {
+        initialVisibleCount: observedItems.length,
+        carouselLeftAdvances: 0,
+        carouselRightAdvances: 0,
+        leftBoundary: boundary,
+        rightBoundary: boundary,
+        leftmostReached: boundary === GalleryBoundaryState.CONFIRMED,
+        rightmostReached: boundary === GalleryBoundaryState.CONFIRMED,
+        totalDiscoveredCount: observedItems.length,
+        imageMediaCount: imageCount,
+        videoMediaCount: videoCount,
+        unknownMediaCount: unknownCount,
+        images: images,
+        scanQuality: isStableSinglePage ? 'COMPLETE' : (images.length > 0 ? 'PARTIAL' : 'FAILED'),
+        completenessReason: isStableSinglePage
+          ? GalleryCompletenessReason.STABLE_SINGLE_PAGE
+          : GalleryCompletenessReason.NOT_COMPLETE,
+        navigationChanged: !!stability.aborted
+      };
+    }
+
     // Step 1: Normalize carousel to the beginning (rewind left)
     const rewindResult = await rewindCarouselToBeginning(galleryContainer, options);
     const leftAdvances = rewindResult.leftAdvances;
-    const leftmostReached = rewindResult.leftmostReached;
+    const leftBoundary = rewindResult.leftBoundary;
 
     // Step 2: Capture initial visible media items at leftmost position
     const initialItems = getVisibleGalleryItems(galleryContainer);
@@ -957,14 +1238,33 @@
     // Step 3: Advance carousel rightward until end
     let rightAdvances = 0;
     let noNewStreak = 0;
-    let rightmostReached = false;
+    let rightBoundary = GalleryBoundaryState.UNKNOWN;
+    let rightControlObserved = false;
 
     while (rightAdvances < maxAdvances) {
-      const advanced = advanceCarousel(galleryContainer);
-      if (!advanced) {
-        rightmostReached = true;
+      const rightBtn = getCarouselRightButton(galleryContainer);
+      const rightControl = getCarouselControlState(rightBtn);
+      const leftControl = getCarouselControlState(getCarouselLeftButton(galleryContainer));
+
+      if (rightControl === GalleryControlState.MISSING) {
+        // Missing right control is proof only after the control system or an
+        // actual traversal has been observed. First-observation absence is UNKNOWN.
+        if (
+          rightControlObserved ||
+          (rightAdvances > 0 && leftControl !== GalleryControlState.MISSING)
+        ) {
+          rightBoundary = GalleryBoundaryState.CONFIRMED;
+        }
         break;
       }
+      rightControlObserved = true;
+      if (rightControl === GalleryControlState.INACTIVE) {
+        rightBoundary = GalleryBoundaryState.CONFIRMED;
+        break;
+      }
+
+      const advanced = clickCarouselButton(rightBtn);
+      if (!advanced) break;
 
       rightAdvances++;
 
@@ -979,17 +1279,26 @@
       if (newItems === 0) {
         noNewStreak++;
         if (noNewStreak >= 2) {
-          // Reached end of carousel pagination
-          rightmostReached = true;
+          const finalRightControl = getCarouselControlState(getCarouselRightButton(galleryContainer));
+          const finalLeftControl = getCarouselControlState(getCarouselLeftButton(galleryContainer));
+          if (
+            finalRightControl === GalleryControlState.INACTIVE ||
+            (
+              finalRightControl === GalleryControlState.MISSING &&
+              finalLeftControl !== GalleryControlState.MISSING
+            )
+          ) {
+            rightBoundary = GalleryBoundaryState.CONFIRMED;
+          } else if (rightControlObserved) {
+            // Two actual right-control interactions with an unchanged ordered
+            // media window are behavioral end-of-carousel proof.
+            rightBoundary = GalleryBoundaryState.CONFIRMED;
+          }
           break;
         }
       } else {
         noNewStreak = 0;
       }
-    }
-
-    if (rightAdvances === 0) {
-      rightmostReached = true; // Single page carousel
     }
 
     // Step 4: Classify and extract images
@@ -1012,21 +1321,38 @@
     });
 
     const finalImages = deduplicateGalleryImages(rawImageUrls);
-    const isComplete = leftmostReached && rightmostReached && finalImages.length > 0;
+    const isComplete = (
+      leftBoundary === GalleryBoundaryState.CONFIRMED &&
+      rightBoundary === GalleryBoundaryState.CONFIRMED &&
+      finalImages.length > 0
+    );
     const scanQuality = isComplete ? 'COMPLETE' : (finalImages.length > 0 ? 'PARTIAL' : 'FAILED');
+    const completenessReason = isComplete
+      ? GalleryCompletenessReason.CAROUSEL_BOUNDS_CONFIRMED
+      : GalleryCompletenessReason.NOT_COMPLETE;
+
+    console.log(
+      `[GALLERY]\nmedia=${orderedDiscovered.length}` +
+      `\nleftBoundary=${leftBoundary}\nrightBoundary=${rightBoundary}` +
+      `\nstable=false\nquality=${scanQuality}\nreason=${completenessReason}`
+    );
 
     return {
       initialVisibleCount: initialVisibleCount,
       carouselLeftAdvances: leftAdvances,
       carouselRightAdvances: rightAdvances,
-      leftmostReached: leftmostReached,
-      rightmostReached: rightmostReached,
+      leftBoundary: leftBoundary,
+      rightBoundary: rightBoundary,
+      leftmostReached: leftBoundary === GalleryBoundaryState.CONFIRMED,
+      rightmostReached: rightBoundary === GalleryBoundaryState.CONFIRMED,
       totalDiscoveredCount: orderedDiscovered.length,
       imageMediaCount: imageMediaCount,
       videoMediaCount: videoMediaCount,
       unknownMediaCount: unknownMediaCount,
       images: finalImages,
-      scanQuality: scanQuality
+      scanQuality: scanQuality,
+      completenessReason: completenessReason,
+      navigationChanged: false
     };
   }
 
@@ -1044,13 +1370,17 @@
       initialVisibleCount: 0,
       carouselLeftAdvances: 0,
       carouselRightAdvances: 0,
+      leftBoundary: GalleryBoundaryState.UNKNOWN,
+      rightBoundary: GalleryBoundaryState.UNKNOWN,
       leftmostReached: false,
       rightmostReached: false,
       totalDiscoveredCount: 0,
       imageMediaCount: 0,
       videoMediaCount: 0,
       unknownMediaCount: 0,
-      scanQuality: 'FAILED'
+      scanQuality: 'FAILED',
+      completenessReason: GalleryCompletenessReason.NOT_COMPLETE,
+      navigationChanged: false
     };
 
     const container = findMainGalleryContainer(doc);
@@ -1064,13 +1394,17 @@
       initialVisibleCount: enumResult.initialVisibleCount,
       carouselLeftAdvances: enumResult.carouselLeftAdvances,
       carouselRightAdvances: enumResult.carouselRightAdvances,
+      leftBoundary: enumResult.leftBoundary,
+      rightBoundary: enumResult.rightBoundary,
       leftmostReached: enumResult.leftmostReached,
       rightmostReached: enumResult.rightmostReached,
       totalDiscoveredCount: enumResult.totalDiscoveredCount,
       imageMediaCount: enumResult.imageMediaCount,
       videoMediaCount: enumResult.videoMediaCount,
       unknownMediaCount: enumResult.unknownMediaCount,
-      scanQuality: enumResult.scanQuality
+      scanQuality: enumResult.scanQuality,
+      completenessReason: enumResult.completenessReason,
+      navigationChanged: enumResult.navigationChanged
     };
   }
 
@@ -1091,13 +1425,26 @@
     const initialGallery = galleryResult?.initialVisibleCount || galCount;
     const leftAdvances = galleryResult?.carouselLeftAdvances || 0;
     const rightAdvances = galleryResult?.carouselRightAdvances || 0;
-    const leftmost = galleryResult?.leftmostReached !== undefined ? galleryResult.leftmostReached : true;
-    const rightmost = galleryResult?.rightmostReached !== undefined ? galleryResult.rightmostReached : true;
+    const leftBoundary = galleryResult?.leftBoundary || GalleryBoundaryState.UNKNOWN;
+    const rightBoundary = galleryResult?.rightBoundary || GalleryBoundaryState.UNKNOWN;
+    const leftmost = leftBoundary === GalleryBoundaryState.CONFIRMED;
+    const rightmost = rightBoundary === GalleryBoundaryState.CONFIRMED;
     const totalDiscovered = galleryResult?.totalDiscoveredCount || galCount;
     const imageMedia = galleryResult?.imageMediaCount || galCount;
     const videoMedia = galleryResult?.videoMediaCount || 0;
     const unknownMedia = galleryResult?.unknownMediaCount || 0;
-    const scanQuality = galleryResult?.scanQuality || (galCount > 0 ? 'COMPLETE' : 'FAILED');
+    const completenessReason = galleryResult?.completenessReason || GalleryCompletenessReason.NOT_COMPLETE;
+    const hasBoundaryProof = (
+      leftBoundary === GalleryBoundaryState.CONFIRMED &&
+      rightBoundary === GalleryBoundaryState.CONFIRMED
+    );
+    const hasValidGalleryProof = hasBoundaryProof && (
+      completenessReason === GalleryCompletenessReason.CAROUSEL_BOUNDS_CONFIRMED ||
+      completenessReason === GalleryCompletenessReason.STABLE_SINGLE_PAGE
+    );
+    const scanQuality = (
+      galCount > 0 && galleryResult?.scanQuality === 'COMPLETE' && hasValidGalleryProof
+    ) ? 'COMPLETE' : (galCount > 0 ? 'PARTIAL' : 'FAILED');
 
     // Case 1: Main Gallery Carousel has images -> Preferred source
     if (galCount > 0) {
@@ -1109,6 +1456,8 @@
         initialGalleryCount: initialGallery,
         carouselLeftAdvances: leftAdvances,
         carouselRightAdvances: rightAdvances,
+        leftBoundary: leftBoundary,
+        rightBoundary: rightBoundary,
         leftmostReached: leftmost,
         rightmostReached: rightmost,
         totalDiscoveredGalleryCount: totalDiscovered,
@@ -1116,7 +1465,11 @@
         videoMediaCount: videoMedia,
         unknownMediaCount: unknownMedia,
         finalCount: galCount,
-        scanQuality: scanQuality
+        scanQuality: scanQuality,
+        completenessReason: scanQuality === 'COMPLETE'
+          ? completenessReason
+          : GalleryCompletenessReason.NOT_COMPLETE,
+        navigationChanged: !!galleryResult?.navigationChanged
       };
     }
 
@@ -1130,14 +1483,18 @@
         initialGalleryCount: 0,
         carouselLeftAdvances: 0,
         carouselRightAdvances: 0,
-        leftmostReached: true,
-        rightmostReached: true,
+        leftBoundary: GalleryBoundaryState.UNKNOWN,
+        rightBoundary: GalleryBoundaryState.UNKNOWN,
+        leftmostReached: false,
+        rightmostReached: false,
         totalDiscoveredGalleryCount: 0,
         imageMediaCount: 0,
         videoMediaCount: 0,
         unknownMediaCount: 0,
         finalCount: structCount,
-        scanQuality: 'COMPLETE'
+        scanQuality: 'PARTIAL',
+        completenessReason: GalleryCompletenessReason.NOT_COMPLETE,
+        navigationChanged: false
       };
     }
 
@@ -1151,14 +1508,18 @@
         initialGalleryCount: 0,
         carouselLeftAdvances: 0,
         carouselRightAdvances: 0,
-        leftmostReached: true,
-        rightmostReached: true,
+        leftBoundary: GalleryBoundaryState.UNKNOWN,
+        rightBoundary: GalleryBoundaryState.UNKNOWN,
+        leftmostReached: false,
+        rightmostReached: false,
         totalDiscoveredGalleryCount: 0,
         imageMediaCount: 0,
         videoMediaCount: 0,
         unknownMediaCount: 0,
         finalCount: 1,
-        scanQuality: 'PARTIAL'
+        scanQuality: 'PARTIAL',
+        completenessReason: GalleryCompletenessReason.NOT_COMPLETE,
+        navigationChanged: false
       };
     }
 
@@ -1171,6 +1532,8 @@
       initialGalleryCount: 0,
       carouselLeftAdvances: 0,
       carouselRightAdvances: 0,
+      leftBoundary: GalleryBoundaryState.UNKNOWN,
+      rightBoundary: GalleryBoundaryState.UNKNOWN,
       leftmostReached: false,
       rightmostReached: false,
       totalDiscoveredGalleryCount: 0,
@@ -1178,7 +1541,9 @@
       videoMediaCount: 0,
       unknownMediaCount: 0,
       finalCount: 0,
-      scanQuality: 'FAILED'
+      scanQuality: 'FAILED',
+      completenessReason: GalleryCompletenessReason.NOT_COMPLETE,
+      navigationChanged: false
     };
   }
 
@@ -1187,18 +1552,60 @@
    * @param {Document} doc
    * @param {string} structuredName
    * @returns {string}
+  /**
+   * Check if a candidate product name is a generic Shopee marketplace header/title.
+   * @param {string} name
+   * @returns {boolean}
+   */
+  function isGenericProductName(name) {
+    if (!name || typeof name !== 'string') return true;
+    const trimmed = name.trim().toLowerCase();
+    if (trimmed.length < 2) return true;
+    if (trimmed === 'shopee' ||
+        trimmed.startsWith('shopee việt nam') ||
+        trimmed.startsWith('shopee vietnam') ||
+        trimmed.startsWith('shopee singapore') ||
+        trimmed.startsWith('shopee malaysia') ||
+        trimmed.startsWith('shopee thailand') ||
+        trimmed.startsWith('shopee philippines') ||
+        trimmed.startsWith('shopee indonesia') ||
+        trimmed.startsWith('shopee taiwan') ||
+        trimmed.startsWith('shopee brasil') ||
+        trimmed.startsWith('shopee |') ||
+        trimmed.includes('mua và bán trên ứng dụng') ||
+        trimmed.includes('online shopping')) {
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Resolves the product name across meta tags, DOM headings, and JSON-LD candidates.
+   * Filters out generic marketplace titles and trims market-specific suffixes.
+   * @param {Document} doc
+   * @param {string} [structuredName]
+   * @returns {string}
    */
   function resolveProductName(doc, structuredName) {
-    if (structuredName) return cleanProductName(structuredName);
+    if (structuredName) {
+      const cleaned = cleanProductName(structuredName);
+      if (!isGenericProductName(cleaned)) return cleaned;
+    }
     if (!doc || !doc.querySelector) return '';
 
     const ogEl = doc.querySelector('meta[property="og:title"]');
     const ogTitle = (ogEl && typeof ogEl.getAttribute === 'function') ? ogEl.getAttribute('content') : (ogEl?.content || '');
-    if (ogTitle) return cleanProductName(ogTitle);
+    if (ogTitle) {
+      const cleaned = cleanProductName(ogTitle);
+      if (!isGenericProductName(cleaned)) return cleaned;
+    }
 
     const twEl = doc.querySelector('meta[name="twitter:title"]');
     const twTitle = (twEl && typeof twEl.getAttribute === 'function') ? twEl.getAttribute('content') : (twEl?.content || '');
-    if (twTitle) return cleanProductName(twTitle);
+    if (twTitle) {
+      const cleaned = cleanProductName(twTitle);
+      if (!isGenericProductName(cleaned)) return cleaned;
+    }
 
     const titleSelectors = [
       'div[class*="product-briefing"] h1',
@@ -1214,13 +1621,15 @@
       try {
         const el = doc.querySelector(sel);
         if (el && el.textContent && el.textContent.trim().length > 3) {
-          return cleanProductName(el.textContent.trim());
+          const cleaned = cleanProductName(el.textContent.trim());
+          if (!isGenericProductName(cleaned)) return cleaned;
         }
       } catch {}
     }
 
     if (doc.title) {
-      return cleanProductName(doc.title);
+      const cleaned = cleanProductName(doc.title);
+      if (!isGenericProductName(cleaned)) return cleaned;
     }
 
     return '';
@@ -1238,6 +1647,28 @@
     return '';
   }
 
+  function hasValidCompletenessProof(data) {
+    if (!data || data.extraction_status !== 'COMPLETE') return false;
+    if (data.image_source !== 'gallery_carousel') return false;
+    if (!Array.isArray(data.images) || data.images.length === 0) return false;
+
+    const reason = data.completeness_reason || data.completenessReason ||
+      data.debug?.completeness_reason || GalleryCompletenessReason.NOT_COMPLETE;
+    const leftBoundary = data.left_boundary || data.leftBoundary ||
+      data.debug?.left_boundary || GalleryBoundaryState.UNKNOWN;
+    const rightBoundary = data.right_boundary || data.rightBoundary ||
+      data.debug?.right_boundary || GalleryBoundaryState.UNKNOWN;
+
+    return (
+      leftBoundary === GalleryBoundaryState.CONFIRMED &&
+      rightBoundary === GalleryBoundaryState.CONFIRMED &&
+      (
+        reason === GalleryCompletenessReason.CAROUSEL_BOUNDS_CONFIRMED ||
+        reason === GalleryCompletenessReason.STABLE_SINGLE_PAGE
+      )
+    );
+  }
+
   // In-memory Product Level Cache & In-flight scan promises
   const productCache = new Map();
   const activeScanningPromises = new Map();
@@ -1248,13 +1679,18 @@
       return productCache.get(productKey) || null;
     },
     set(productKey, data) {
-      if (!productKey || !data) return;
+      if (!productKey || !data) return false;
+      if (data.extraction_status === 'COMPLETE' && !hasValidCompletenessProof(data)) {
+        console.warn(`[GALLERY CACHE] rejected COMPLETE without proof for product=${productKey}`);
+        return false;
+      }
       productCache.set(productKey, data);
+      return true;
     },
     hasComplete(productKey) {
       if (!productKey) return false;
       const entry = productCache.get(productKey);
-      return !!(entry && entry.extraction_status === 'COMPLETE' && Array.isArray(entry.images) && entry.images.length > 0);
+      return hasValidCompletenessProof(entry);
     },
     invalidate(productKey) {
       if (productKey) {
@@ -1285,7 +1721,9 @@
     const urlInfo = parseShopeeUrl(url);
     const initialKey = createProductKey(urlInfo.shopId, urlInfo.itemId);
     const forceRescan = options.forceRescan === true;
-    const previousComplete = initialKey ? ProductCache.get(initialKey) : null;
+    const previousComplete = initialKey && ProductCache.hasComplete(initialKey)
+      ? ProductCache.get(initialKey)
+      : null;
     const previousImageCount = previousComplete?.images ? previousComplete.images.length : 0;
 
     // 1. If not forcing a rescan and we already have an authoritative COMPLETE result, return it immediately
@@ -1327,9 +1765,21 @@
       const isShopeePage = urlInfo.isShopee;
       const isSupportedProduct = isShopeePage && (productName.length > 0 || itemId.length > 0 || bestSource.images.length > 0);
 
-      // Scan quality assessment
-      const scanQuality = bestSource.scanQuality || (bestSource.images.length > 0 ? 'COMPLETE' : (isSupportedProduct ? 'FAILED' : 'IDLE'));
-      const isScanComplete = scanQuality === 'COMPLETE';
+      // COMPLETE is proof-driven. Candidate count never promotes a result.
+      const hasValidProof = (
+        bestSource.selectedSource === 'gallery_carousel' &&
+        bestSource.scanQuality === 'COMPLETE' &&
+        bestSource.leftBoundary === GalleryBoundaryState.CONFIRMED &&
+        bestSource.rightBoundary === GalleryBoundaryState.CONFIRMED &&
+        (
+          bestSource.completenessReason === GalleryCompletenessReason.CAROUSEL_BOUNDS_CONFIRMED ||
+          bestSource.completenessReason === GalleryCompletenessReason.STABLE_SINGLE_PAGE
+        )
+      );
+      const scanQuality = hasValidProof
+        ? 'COMPLETE'
+        : (bestSource.images.length > 0 ? 'PARTIAL' : (isSupportedProduct ? 'FAILED' : 'IDLE'));
+      const isScanComplete = hasValidProof;
 
       const temporaryScanResult = {
         success: isSupportedProduct,
@@ -1344,17 +1794,28 @@
         image_count: bestSource.images.length,
         image_source: bestSource.selectedSource,
         extraction_status: scanQuality,
+        left_boundary: bestSource.leftBoundary,
+        right_boundary: bestSource.rightBoundary,
+        completeness_reason: isScanComplete
+          ? bestSource.completenessReason
+          : GalleryCompletenessReason.NOT_COMPLETE,
+        navigation_changed: !!bestSource.navigationChanged,
         completed_at: Date.now(),
         debug: {
           trigger_reason: forceRescan ? 'manual_rescan' : (resolvedKey ? 'initial' : 'product_changed'),
           previous_complete_images: previousImageCount,
           canonical_gallery_found: galleryResult.found,
+          left_boundary: bestSource.leftBoundary,
+          right_boundary: bestSource.rightBoundary,
           leftmost_reached: bestSource.leftmostReached,
           rightmost_reached: bestSource.rightmostReached,
           carousel_left_advances: bestSource.carouselLeftAdvances,
           carousel_right_advances: bestSource.carouselRightAdvances,
           total_unique_media: bestSource.totalDiscoveredGalleryCount,
           temporary_scan_status: scanQuality,
+          completeness_reason: isScanComplete
+            ? bestSource.completenessReason
+            : GalleryCompletenessReason.NOT_COMPLETE,
           cache_replaced: isScanComplete,
           final_authoritative_images: isScanComplete ? bestSource.finalCount : (previousImageCount || bestSource.finalCount),
           product_key: resolvedKey || 'N/A',
@@ -1390,12 +1851,15 @@
               trigger_reason: forceRescan ? 'manual_rescan' : 'partial_fallback_prevented',
               previous_complete_images: previousImageCount,
               canonical_gallery_found: galleryResult.found,
+              left_boundary: bestSource.leftBoundary,
+              right_boundary: bestSource.rightBoundary,
               leftmost_reached: bestSource.leftmostReached,
               rightmost_reached: bestSource.rightmostReached,
               carousel_left_advances: bestSource.carouselLeftAdvances,
               carousel_right_advances: bestSource.carouselRightAdvances,
               total_unique_media: bestSource.totalDiscoveredGalleryCount,
               temporary_scan_status: scanQuality,
+              temporary_completeness_reason: GalleryCompletenessReason.NOT_COMPLETE,
               cache_replaced: false,
               final_authoritative_images: authoritative.images.length
             }
@@ -1419,6 +1883,9 @@
   }
 
   return {
+    GalleryBoundaryState,
+    GalleryCompletenessReason,
+    GALLERY_STABILITY_CONFIG,
     isShopeeDomain,
     parseShopeeUrl,
     cleanProductName,
@@ -1437,13 +1904,18 @@
     getVisibleGalleryItems,
     getCarouselRightButton,
     getCarouselLeftButton,
+    getCarouselControlState,
+    captureGalleryObservation,
+    createGalleryStabilitySession,
     advanceCarousel,
     rewindCarouselToBeginning,
     enumerateCompleteGallery,
     extractMainGalleryImages,
     chooseBestImageSource,
     resolveProductName,
+    isGenericProductName,
     createProductKey,
+    hasValidCompletenessProof,
     ProductCache,
     extractProductData
   };

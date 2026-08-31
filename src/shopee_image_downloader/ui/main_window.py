@@ -1,7 +1,10 @@
 """Main window implementation for Shopee Image Downloader."""
 
+import logging
 from pathlib import Path
 from PySide6.QtCore import QEvent, Qt
+
+logger = logging.getLogger(__name__)
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -19,6 +22,27 @@ from PySide6.QtWidgets import (
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
+)
+from shopee_image_downloader.core.batch_queue import (
+    BatchQueueManager,
+    ItemState,
+    QueueState,
+    STATUS_DISPLAY_CANCELLED,
+    STATUS_DISPLAY_FAILED,
+    STATUS_DISPLAY_NAVIGATING,
+    STATUS_DISPLAY_NOT_FOUND,
+    STATUS_DISPLAY_SCANNING,
+    STATUS_DISPLAY_SUCCESS,
+    STATUS_DISPLAY_TIMEOUT,
+    STATUS_DISPLAY_VERIFICATION,
+    STATUS_DISPLAY_WAITING,
+)
+from shopee_image_downloader.core.bridge_protocol import (
+    BridgeProductData,
+    create_batch_finished_message,
+    create_cancel_processing_message,
+    create_open_product_message,
+    create_process_url_message,
 )
 from shopee_image_downloader.core.browser_session import (
     STATUS_CHECKING_SESSION,
@@ -49,12 +73,17 @@ from shopee_image_downloader.core.url_validator import (
 )
 from shopee_image_downloader.storage.settings import SettingsManager
 from shopee_image_downloader.workers.auth_worker import AuthLoginWorker
+from shopee_image_downloader.workers.bridge_worker import ExtensionBridgeServer
 from shopee_image_downloader.workers.metadata_worker import MetadataExtractorWorker
 
 STATUS_RESOLVING: str = "Đang xử lý link"
 STATUS_EXTRACTING: str = "Đang lấy thông tin"
 STATUS_COMPLETED: str = "Đã lấy thông tin"
 STATUS_FAILED: str = "Không thể xử lý link"
+
+STATUS_BRIDGE_DISCONNECTED: str = "🔴 Chưa kết nối"
+STATUS_BRIDGE_CONNECTED: str = "🟢 Đã kết nối"
+STATUS_BRIDGE_LOST: str = "🔴 Mất kết nối"
 
 
 class MainWindow(QMainWindow):
@@ -69,6 +98,8 @@ class MainWindow(QMainWindow):
         session_manager: ShopeeSessionManager | None = None,
         resolver: ShopeeUrlResolver | None = None,
         extractor: ShopeeMetadataExtractor | None = None,
+        bridge_server: ExtensionBridgeServer | None = None,
+        start_bridge: bool = True,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Shopee Image Downloader")
@@ -81,11 +112,44 @@ class MainWindow(QMainWindow):
             resolver=self.resolver,
             session_manager=self.session_manager,
         )
+        self.bridge_server = bridge_server or ExtensionBridgeServer(parent=self)
+        self.queue_manager = BatchQueueManager(parent=self)
+        self._start_bridge = start_bridge
         self._worker: MetadataExtractorWorker | None = None
         self._auth_worker: AuthLoginWorker | None = None
+        self._bridge_has_connected_before: bool = False
+        self._rows_by_request_id: dict[str, int] = {}
+        self._rows_by_product_key: dict[str, int] = {}
+        self._extension_products: dict[str, int] = self._rows_by_product_key
 
         self._init_ui()
         self._restore_settings()
+        self._init_bridge()
+
+    def _init_bridge(self) -> None:
+        """Connect bridge signals and start the local WebSocket server."""
+        self.bridge_server.connection_status_changed.connect(self._on_bridge_status_changed)
+        self.bridge_server.product_received.connect(self._on_bridge_product_received)
+        self.bridge_server.process_progress_received.connect(self._on_bridge_process_progress_received)
+        self.bridge_server.process_error_received.connect(self._on_bridge_process_error_received)
+        self.bridge_server.verification_required_received.connect(self._on_bridge_verification_required_received)
+        self.bridge_server.error_occurred.connect(self._on_bridge_error)
+
+        # Connect BatchQueueManager signals
+        self.queue_manager.state_changed.connect(self._on_queue_state_changed)
+        self.queue_manager.send_open_product_requested.connect(self._on_queue_send_open_product)
+        self.queue_manager.send_cancel_requested.connect(self._on_queue_send_cancel)
+        self.queue_manager.item_started.connect(self._on_queue_item_started)
+        self.queue_manager.item_progress.connect(self._on_queue_item_progress)
+        self.queue_manager.item_completed.connect(self._on_queue_item_completed)
+        self.queue_manager.item_failed.connect(self._on_queue_item_failed)
+        self.queue_manager.verification_required.connect(self._on_queue_verification_required)
+        self.queue_manager.progress_updated.connect(self._on_queue_progress_updated)
+        self.queue_manager.batch_finished.connect(self._on_queue_batch_finished)
+
+        if self._start_bridge:
+            self.bridge_server.start_server()
+
 
     def _init_ui(self) -> None:
         """Initialize all UI widgets, layouts, account controls, and table columns."""
@@ -131,6 +195,28 @@ class MainWindow(QMainWindow):
         account_layout.addWidget(self.logout_button)
 
         root_layout.addWidget(account_frame)
+
+        # 1.1 Chrome Extension Bridge Section
+        bridge_frame = QFrame(central_widget)
+        bridge_frame.setFrameShape(QFrame.Shape.StyledPanel)
+        bridge_frame.setStyleSheet(
+            "QFrame { background-color: #f8f9fa; border: 1px solid #dee2e6; border-radius: 6px; padding: 4px; }"
+        )
+        bridge_layout = QHBoxLayout(bridge_frame)
+        bridge_layout.setContentsMargins(8, 6, 8, 6)
+        bridge_layout.setSpacing(10)
+
+        self.bridge_title_label = QLabel("Chrome Extension:", bridge_frame)
+        self.bridge_title_label.setStyleSheet("font-weight: bold; font-size: 13px; border: none;")
+        bridge_layout.addWidget(self.bridge_title_label)
+
+        self.bridge_status_label = QLabel(STATUS_BRIDGE_DISCONNECTED, bridge_frame)
+        self.bridge_status_label.setStyleSheet("font-weight: bold; font-size: 13px; border: none;")
+        bridge_layout.addWidget(self.bridge_status_label)
+
+        bridge_layout.addStretch(1)
+        root_layout.addWidget(bridge_frame)
+
 
         # 2. URL Input Section
         self.url_label = QLabel("Link sản phẩm Shopee", central_widget)
@@ -332,22 +418,30 @@ class MainWindow(QMainWindow):
             self.settings_manager.set_output_folder(normalized_path)
 
     def handle_start_validation(self) -> None:
-        """Validate output directory, verify Shopee auth session, parse URLs, and start batch."""
-        # 1. Output directory check
+        """Handle start, cancel, or resume batch processing actions."""
+        # 1. If currently RUNNING, action button acts as Cancel
+        if self.queue_manager.state == QueueState.RUNNING:
+            self.queue_manager.cancel_batch()
+            return
+
+        # 2. If PAUSED_VERIFICATION, action button acts as Resume (Tiếp tục)
+        if self.queue_manager.state == QueueState.PAUSED_VERIFICATION:
+            self.queue_manager.resume_verification()
+            return
+
+        # 3. Output directory check
         output_folder = self.output_folder_input.text().strip()
         if not output_folder or not Path(output_folder).is_dir():
             self.status_label.setText("Vui lòng chọn thư mục lưu ảnh.")
             return
 
-        # 2. Authentication session check BEFORE batch extraction loop
-        if self.session_manager.get_session_status() != STATUS_LOGGED_IN:
-            self.status_label.setText("Vui lòng đăng nhập Shopee trước.")
-            return
-
-        # 3. URL parsing and validation
+        # 4. URL parsing and table population
         raw_text = self.url_input.toPlainText()
         parsed_items = parse_url_lines(raw_text)
 
+        self._rows_by_request_id.clear()
+        self._rows_by_product_key.clear()
+        self._extension_products.clear()
         self.results_table.setRowCount(0)
         self.results_table.setRowCount(len(parsed_items))
 
@@ -377,88 +471,270 @@ class MainWindow(QMainWindow):
             self.status_label.setText("Đã nhận 0 link hợp lệ")
             return
 
-        # Start background worker for product metadata extraction
-        self.start_button.setEnabled(False)
+        # 5. Chrome Extension bridge connection check
+        if not self.bridge_server.has_connected_clients:
+            self.status_label.setText("Chrome Extension chưa kết nối.")
+            return
+
+        # 6. Start sequential batch queue
         self.progress_bar.setValue(0)
-        self.status_label.setText(f"Đang xử lý {len(valid_items)} link...")
+        self.status_label.setText(f"Đang xử lý 1/{len(valid_items)} sản phẩm...")
+        self.queue_manager.start_batch(valid_items)
+        for q_item in self.queue_manager._items:
+            self._rows_by_request_id[q_item.request_id] = q_item.row_idx
 
-        self._worker = MetadataExtractorWorker(
-            items=valid_items,
-            extractor=self.extractor,
-            session_manager=self.session_manager,
-            parent=self,
-        )
-        self._worker.item_started.connect(self._on_item_started)
-        self._worker.item_status_updated.connect(self._on_item_status_updated)
-        self._worker.item_completed.connect(self._on_item_completed)
-        self._worker.progress_updated.connect(self._on_progress_updated)
-        self._worker.batch_finished.connect(self._on_batch_finished)
-        self._worker.start()
+    def _on_queue_state_changed(self, new_state_str: str) -> None:
+        """Update Start/Cancel/Resume button text according to queue state."""
+        if new_state_str == QueueState.RUNNING.value:
+            self.start_button.setText("Hủy")
+            self.start_button.setEnabled(True)
+        elif new_state_str == QueueState.PAUSED_VERIFICATION.value:
+            self.start_button.setText("Tiếp tục")
+            self.start_button.setEnabled(True)
+        else:
+            self.start_button.setText("Bắt đầu tải ảnh")
+            self.start_button.setEnabled(True)
 
-    def _on_item_started(self, row_idx: int, url: str) -> None:
-        """Handle signal when worker begins processing a URL."""
+    def _on_queue_send_open_product(self, request_id: str, url: str) -> None:
+        """Send open_product message to Chrome Extension via bridge."""
+        msg = create_open_product_message(request_id, url)
+        self.bridge_server.send_message(msg)
+
+    def _on_queue_send_process_url(self, request_id: str, url: str) -> None:
+        """Send process_url message to Chrome Extension via bridge (backward compatibility)."""
+        msg = create_process_url_message(request_id, url)
+        self.bridge_server.send_message(msg)
+
+    def _on_queue_send_cancel(self, request_id: str) -> None:
+        """Send cancel_processing message to Chrome Extension via bridge."""
+        msg = create_cancel_processing_message(request_id)
+        self.bridge_server.send_message(msg)
+
+    def _on_bridge_process_progress_received(self, request_id: str, stage: str) -> None:
+        """Forward process progress message from bridge to queue manager."""
+        self.queue_manager.handle_process_progress(request_id, stage)
+
+    def _on_bridge_process_error_received(self, request_id: str, url: str, error_code: str, message: str) -> None:
+        """Forward process error message from bridge to queue manager."""
+        self.queue_manager.handle_process_error(request_id, url, error_code, message)
+
+    def _on_bridge_verification_required_received(self, request_id: str, url: str, message: str) -> None:
+        """Forward verification required message from bridge to queue manager."""
+        self.queue_manager.handle_process_error(request_id, url, "VERIFICATION_REQUIRED", message)
+
+    def _on_queue_item_started(self, row_idx: int, url: str, request_id: str) -> None:
+        """Handle item start event from queue manager."""
         status_item = self.results_table.item(row_idx, 2)
         if status_item:
-            status_item.setText(STATUS_RESOLVING)
-        self.status_label.setText(f"Đang xử lý link dòng {row_idx + 1}...")
+            status_item.setText(STATUS_DISPLAY_NAVIGATING)
+        total = self.queue_manager.total_count
+        cur_idx = self.queue_manager._current_index + 1
+        self.status_label.setText(f"Đang xử lý {cur_idx}/{total} sản phẩm...")
 
-    def _on_item_status_updated(self, row_idx: int, status_text: str) -> None:
-        """Handle signal when worker updates intermediate status for a row."""
+    def _on_queue_item_progress(self, row_idx: int, stage: str, display_text: str) -> None:
+        """Handle item progress stage update."""
+        status_item = self.results_table.item(row_idx, 2)
+        if status_item:
+            status_item.setText(display_text)
+
+    def _update_table_row(
+        self,
+        row_idx: int,
+        product_data: BridgeProductData,
+        status_text: str = STATUS_DISPLAY_SUCCESS,
+    ) -> None:
+        """Update an existing table row with authoritative product data and bind indexes."""
+        if row_idx < 0 or row_idx >= self.results_table.rowCount():
+            return
+
+        link_item = self.results_table.item(row_idx, 1)
+        if link_item:
+            link_item.setText(product_data.product_name)
+
         status_item = self.results_table.item(row_idx, 2)
         if status_item:
             status_item.setText(status_text)
-        self.status_label.setText(f"{status_text} dòng {row_idx + 1}...")
 
-    def _on_item_completed(self, row_idx: int, result: ProductMetadata) -> None:
-        """Handle signal when worker completes metadata extraction for a single row."""
+        count_item = self.results_table.item(row_idx, 3)
+        if count_item:
+            count_item.setText(str(len(product_data.images)))
+
+        # Bind indexes
+        key = product_data.product_key
+        if key:
+            self._rows_by_product_key[key] = row_idx
+            self._extension_products[key] = row_idx
+        if product_data.request_id:
+            self._rows_by_request_id[product_data.request_id] = row_idx
+
+        logger.info(
+            "[DESKTOP]\nrequest_id=%s\nproduct_key=%s\nreceived=%d\nstored=%d\nrow=%d",
+            product_data.request_id or "N/A",
+            product_data.product_key,
+            len(product_data.images),
+            len(product_data.images),
+            row_idx,
+        )
+
+        tooltip_parts = [
+            f"Tên sản phẩm: {product_data.product_name}",
+            f"Shop ID: {product_data.shop_id}",
+            f"Item ID: {product_data.item_id}",
+            f"URL: {product_data.url or product_data.final_url}",
+            f"Số ảnh: {len(product_data.images)}",
+        ]
+        tooltip_text = "\n".join(tooltip_parts)
+        for col in range(4):
+            item = self.results_table.item(row_idx, col)
+            if item:
+                item.setToolTip(tooltip_text)
+
+        finished = self.queue_manager.get_finished_count()
+        total = self.queue_manager.total_count
+        if total > 0:
+            self.status_label.setText(f"Đang xử lý {finished}/{total} sản phẩm")
+
+    def _on_queue_item_completed(self, row_idx: int, product_data: BridgeProductData) -> None:
+        """Handle item completion from queue manager."""
+        self._update_table_row(row_idx, product_data, status_text=STATUS_DISPLAY_SUCCESS)
+
+    def _on_queue_item_failed(self, row_idx: int, error_code: str, error_message: str) -> None:
+        """Handle item failure from queue manager."""
         status_item = self.results_table.item(row_idx, 2)
-        link_item = self.results_table.item(row_idx, 1)
+        if status_item:
+            status_item.setText(error_message)
+            status_item.setToolTip(f"Lỗi: {error_code} - {error_message}")
 
-        if result.error is None and result.product_name:
-            if link_item:
-                link_item.setText(result.product_name)
+        finished = self.queue_manager.get_finished_count()
+        total = self.queue_manager.total_count
+        self.status_label.setText(f"Đang xử lý {finished}/{total} sản phẩm")
 
-            if status_item:
-                status_item.setText(STATUS_COMPLETED)
+    def _on_queue_verification_required(self, row_idx: int, url: str, message: str) -> None:
+        """Handle verification challenge pause."""
+        status_item = self.results_table.item(row_idx, 2)
+        if status_item:
+            status_item.setText(STATUS_DISPLAY_VERIFICATION)
+            status_item.setToolTip(message)
+        self.status_label.setText("Shopee yêu cầu xác minh trên Chrome. Vui lòng giải quyết trên Chrome rồi nhấn 'Tiếp tục'.")
 
-            tooltip_parts = []
-            if result.product_name:
-                tooltip_parts.append(f"Tên sản phẩm: {result.product_name}")
-            if result.shop_id:
-                tooltip_parts.append(f"Shop ID: {result.shop_id}")
-            if result.item_id:
-                tooltip_parts.append(f"Item ID: {result.item_id}")
-            if result.final_url:
-                tooltip_parts.append(f"URL: {result.final_url}")
-            if tooltip_parts:
-                tooltip_text = "\n".join(tooltip_parts)
-                if status_item:
-                    status_item.setToolTip(tooltip_text)
-                if link_item:
-                    link_item.setToolTip(tooltip_text)
-        else:
-            err_msg = result.error or ERROR_PRODUCT_NOT_FOUND
-            if status_item:
-                status_item.setText(err_msg)
-                status_item.setToolTip(err_msg)
-
-    def _on_progress_updated(self, completed: int, total: int) -> None:
-        """Handle signal updating the progress bar during batch processing."""
-        percent = int((completed / total) * 100) if total > 0 else 0
+    def _on_queue_progress_updated(self, finished: int, total: int) -> None:
+        """Update progress bar with finished/total fraction."""
+        percent = int((finished / total) * 100) if total > 0 else 0
         self.progress_bar.setValue(percent)
 
-    def _on_batch_finished(self, results: list[ProductMetadata]) -> None:
-        """Handle signal when all items in the extraction queue have completed."""
-        self.start_button.setEnabled(True)
+    def _on_queue_batch_finished(self, success_count: int, fail_count: int, items: list) -> None:
+        """Handle overall batch completion."""
+        self.start_button.setText("Bắt đầu tải ảnh")
         self.progress_bar.setValue(100)
-        success_count = sum(
-            1 for r in results if r.error is None and r.product_name
-        )
-        total_count = len(results)
-        self.status_label.setText(f"Đã lấy thông tin {success_count}/{total_count} sản phẩm")
+        self.status_label.setText(f"Hoàn tất: {success_count} thành công, {fail_count} lỗi")
+        # Notify Chrome Extension to restore user's original tab
+        msg = create_batch_finished_message(success_count, fail_count)
+        self.bridge_server.send_message(msg)
+
+    def _on_bridge_status_changed(self, connected: bool) -> None:
+        """Update Chrome Extension connection state in the UI."""
+        if connected:
+            self._bridge_has_connected_before = True
+            self.bridge_status_label.setText(STATUS_BRIDGE_CONNECTED)
+        else:
+            if self._bridge_has_connected_before:
+                self.bridge_status_label.setText(STATUS_BRIDGE_LOST)
+            else:
+                self.bridge_status_label.setText(STATUS_BRIDGE_DISCONNECTED)
+
+    def _on_bridge_error(self, error_message: str) -> None:
+        """Handle errors reported by the WebSocket bridge."""
+        self.status_label.setText(f"Lỗi Bridge: {error_message}")
+
+    def _on_bridge_product_received(self, product_data: BridgeProductData) -> None:
+        """Handle product result received from the Chrome Extension bridge.
+
+        Updates existing rows matched by request_id or product_key without appending duplicates.
+        """
+        # Validate integrity
+        if product_data.image_count is not None and product_data.image_count != len(product_data.images):
+            logger.error(
+                "Lỗi đồng bộ dữ liệu ảnh: image_count=%s != len(images)=%d",
+                product_data.image_count,
+                len(product_data.images),
+            )
+            self.status_label.setText("Lỗi đồng bộ dữ liệu ảnh từ Chrome")
+            return
+
+        key = product_data.product_key
+        req_id = product_data.request_id
+
+        # Determine target row_idx
+        row_idx: int | None = None
+        if req_id and req_id in self._rows_by_request_id:
+            row_idx = self._rows_by_request_id[req_id]
+        elif key and key in self._rows_by_product_key:
+            row_idx = self._rows_by_product_key[key]
+
+        if row_idx is not None and row_idx < self.results_table.rowCount():
+            status_text = STATUS_DISPLAY_SUCCESS if self.queue_manager.is_running else "Đã nhận từ Chrome"
+            self._update_table_row(row_idx, product_data, status_text=status_text)
+            if not self.queue_manager.is_running:
+                self.status_label.setText(f"Đã nhận từ Chrome: {product_data.product_name}")
+        else:
+            row_idx = self.results_table.rowCount()
+            self.results_table.insertRow(row_idx)
+
+            stt_item = QTableWidgetItem(str(row_idx + 1))
+            stt_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+
+            link_item = QTableWidgetItem(product_data.product_name)
+
+            status_item = QTableWidgetItem("Đã nhận từ Chrome")
+            status_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+
+            count_item = QTableWidgetItem(str(len(product_data.images)))
+            count_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+
+            self.results_table.setItem(row_idx, 0, stt_item)
+            self.results_table.setItem(row_idx, 1, link_item)
+            self.results_table.setItem(row_idx, 2, status_item)
+            self.results_table.setItem(row_idx, 3, count_item)
+
+            if key:
+                self._rows_by_product_key[key] = row_idx
+                self._extension_products[key] = row_idx
+            if req_id:
+                self._rows_by_request_id[req_id] = row_idx
+
+            logger.info(
+                "[DESKTOP INSERT]\nrequest_id=%s\nproduct_key=%s\nreceived=%d\nstored=%d\nrow=%d",
+                req_id or "N/A",
+                product_data.product_key,
+                len(product_data.images),
+                len(product_data.images),
+                row_idx,
+            )
+
+            tooltip_parts = [
+                f"Tên sản phẩm: {product_data.product_name}",
+                f"Shop ID: {product_data.shop_id}",
+                f"Item ID: {product_data.item_id}",
+                f"URL: {product_data.url or product_data.final_url}",
+                f"Số ảnh: {len(product_data.images)}",
+            ]
+            tooltip_text = "\n".join(tooltip_parts)
+            for col in range(4):
+                item = self.results_table.item(row_idx, col)
+                if item:
+                    item.setToolTip(tooltip_text)
+
+            self.status_label.setText(
+                f"Đã nhận từ Chrome: {product_data.product_name} ({len(product_data.images)} ảnh)"
+            )
+
+        if self.queue_manager.is_running:
+            self.queue_manager.handle_product_result(product_data)
 
     def closeEvent(self, event: QCloseEvent) -> None:
-        """Ensure background workers are cleanly interrupted on window close."""
+        """Ensure background workers, queue, and bridge server are cleanly interrupted on window close."""
+        self.queue_manager.cancel_batch()
+        self.bridge_server.stop_server()
         if self._auth_worker and self._auth_worker.isRunning():
             self._auth_worker.cancel()
             self._auth_worker.wait(1000)
@@ -467,3 +743,4 @@ class MainWindow(QMainWindow):
             self._worker.wait(1000)
         self.session_manager.close_auth_browser()
         super().closeEvent(event)
+

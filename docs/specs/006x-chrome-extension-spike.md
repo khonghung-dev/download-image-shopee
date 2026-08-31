@@ -102,19 +102,25 @@ Shopee's product gallery thumbnail carousel is **NOT a scroll container** (`scro
 - **Left Arrow Button**: `<button class="shopee-icon-button ... UTST3I"><img alt="icon arrow left bold" ...></button>`.
 
 ### Button-Driven Carousel Enumeration (`enumerateCompleteGallery`)
-1. **Rewind Normalization (`rewindCarouselToBeginning`)**: Before advancing rightward, the engine moves the carousel LEFT repeatedly using `button img[alt*="arrow left bold" i]` / `button.UTST3I` until the leftmost position is confirmed. This guarantees enumeration always starts from index 0 regardless of whichever thumbnail window the user previously selected.
-2. **Initial Capture**: Collects currently visible thumbnail items (`.qIctnQ`) at the canonical beginning of the carousel.
-3. **Media Classification (`classifyGalleryMediaItem`)**:
+1. **Explicit Boundary State**: Left and right boundaries start as `UNKNOWN`; they become `CONFIRMED` only through observed carousel controls/behavior or stable-single-page proof. A currently missing arrow and zero carousel advances are never boundary proof.
+2. **Rewind Normalization (`rewindCarouselToBeginning`)**: Before advancing rightward, the engine moves the carousel LEFT repeatedly using `button img[alt*="arrow left bold" i]` / `button.UTST3I` until the left boundary is behaviorally confirmed. A missing left arrow is accepted only after the opposite control system or a real prior traversal has been observed.
+3. **Initial Capture**: Collects currently visible thumbnail items (`.qIctnQ`) at the canonical beginning of the carousel.
+4. **Media Classification (`classifyGalleryMediaItem`)**:
    - `VIDEO`: Contains `img[alt*="video play" i]`, `img.emXGWZ`, `<video>`, or duration indicators (`0:30`). Video posters are strictly excluded from `images[]`.
    - `IMAGE`: Contains `img` / `<picture>` / background image.
    - `UNKNOWN`: Other non-image elements.
-4. **Carousel Advancement (`advanceCarousel`)**:
+5. **Carousel Advancement (`advanceCarousel`)**:
    - Finds right arrow button (`button img[alt*="arrow right bold" i]`, `button.mARMpd`).
    - If clickable and not disabled, triggers click to advance carousel.
    - Bounded delay (50–60ms) to allow Shopee DOM to render next thumbnail window.
    - Collects newly exposed `.qIctnQ` items and records them in memory preserving first-seen gallery order.
    - Handles overlapping windows (e.g. `[A,B,C,D,E]` -> `[B,C,D,E,F]` -> `[C,D,E,F,G]` -> `A,B,C,D,E,F,G`).
-   - Terminates when advancing produces no new items, right button becomes disabled, or safety cap is reached.
+   - Confirms the right boundary through an inactive control, a control-system transition after real traversal, or repeated real control interactions with an unchanged ordered media window. Failure to click and zero advances remain `UNKNOWN`.
+6. **Stable Single-Page Proof**:
+   - When both arrows are absent, a `MutationObserver` is attached only to the canonical gallery subtree.
+   - Ordered media identities and arrow-control states must remain unchanged for the centralized 1000 ms quiet window while product identity and document visibility remain valid.
+   - Relevant media/control mutations reset the quiet window. Only then may a no-arrow gallery become `COMPLETE` with `completeness_reason: "STABLE_SINGLE_PAGE"`.
+7. **Completeness Proof**: `COMPLETE` requires either `CAROUSEL_BOUNDS_CONFIRMED` or `STABLE_SINGLE_PAGE`; otherwise `completeness_reason` is `NOT_COMPLETE` and quality is `PARTIAL`/`FAILED`.
 
 ### Product-Level Cache & Transactional Rescan Architecture
 To prevent incidental UI mutations (such as a user clicking on a gallery thumbnail to view the large hero image) or failed/partial rescans from overwriting an authoritative complete result:
@@ -123,7 +129,8 @@ To prevent incidental UI mutations (such as a user clicking on a gallery thumbna
    - Every product is uniquely keyed in memory: `productKey = `${shop_id}:${item_id}``.
    - URL modifications involving tracking params (`?sp_atk=...`), variation selections, or sub-paths retain the same `productKey`.
 2. **Authoritative `COMPLETE` State**:
-   - When a full gallery traversal finishes with valid images, it is assigned `extraction_status: 'COMPLETE'`.
+   - A result is assigned `extraction_status: 'COMPLETE'` only when both explicit boundaries are `CONFIRMED` and its reason is `CAROUSEL_BOUNDS_CONFIRMED` or `STABLE_SINGLE_PAGE`.
+   - `ProductCache` rejects any `COMPLETE` entry without a valid gallery proof; image count alone can never make a cache entry authoritative.
    - Subsequent extraction calls for the same `productKey` immediately return the authoritative cached `COMPLETE` result without re-evaluating partial DOM snapshots.
 3. **Transactional Rescan Lifecycle**:
    - When user clicks **[Quét lại]** (`forceRescan: true`), existing `COMPLETE` cache is NOT deleted upfront.
