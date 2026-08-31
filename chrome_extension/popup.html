@@ -211,6 +211,32 @@
       background-color: var(--success);
     }
 
+    .btn-rescan {
+      background-color: #f1f5f9;
+      color: #334155;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 10px 12px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 5px;
+      transition: background-color 0.15s ease;
+      white-space: nowrap;
+    }
+
+    .btn-rescan:hover {
+      background-color: #e2e8f0;
+      color: #0f172a;
+    }
+
+    .btn-rescan:active {
+      transform: scale(0.98);
+    }
+
     /* Images preview & list */
     .images-section {
       background: var(--card-bg);
@@ -374,39 +400,55 @@
       <!-- Debug & Source Card -->
       <div class="debug-box">
         <div class="debug-row">
-          <span class="debug-label">Structured candidates:</span>
-          <span id="debug-struct-count" class="debug-val">0</span>
+          <span class="debug-label">Product key:</span>
+          <span id="debug-product-key" class="debug-val">--</span>
         </div>
         <div class="debug-row">
-          <span class="debug-label">Initial visible gallery media:</span>
-          <span id="debug-initial-visible" class="debug-val">0</span>
+          <span class="debug-label">Trigger reason:</span>
+          <span id="debug-trigger-reason" class="debug-val">--</span>
         </div>
         <div class="debug-row">
-          <span class="debug-label">Carousel advances:</span>
-          <span id="debug-carousel-advances" class="debug-val">0</span>
+          <span class="debug-label">Previous COMPLETE images:</span>
+          <span id="debug-prev-complete" class="debug-val">0</span>
         </div>
         <div class="debug-row">
-          <span class="debug-label">Total unique gallery media discovered:</span>
+          <span class="debug-label">Canonical gallery found:</span>
+          <span id="debug-canonical-found" class="debug-val">--</span>
+        </div>
+        <div class="debug-row">
+          <span class="debug-label">Leftmost reached:</span>
+          <span id="debug-leftmost-reached" class="debug-val">--</span>
+        </div>
+        <div class="debug-row">
+          <span class="debug-label">Rightmost reached:</span>
+          <span id="debug-rightmost-reached" class="debug-val">--</span>
+        </div>
+        <div class="debug-row">
+          <span class="debug-label">Carousel left advances:</span>
+          <span id="debug-left-advances" class="debug-val">0</span>
+        </div>
+        <div class="debug-row">
+          <span class="debug-label">Carousel right advances:</span>
+          <span id="debug-right-advances" class="debug-val">0</span>
+        </div>
+        <div class="debug-row">
+          <span class="debug-label">Total unique media discovered:</span>
           <span id="debug-total-discovered" class="debug-val">0</span>
         </div>
         <div class="debug-row">
-          <span class="debug-label">Image media:</span>
-          <span id="debug-image-media" class="debug-val">0</span>
+          <span class="debug-label">Temporary scan status:</span>
+          <span id="debug-temp-status" class="debug-val">--</span>
         </div>
         <div class="debug-row">
-          <span class="debug-label">Video media:</span>
-          <span id="debug-video-media" class="debug-val">0</span>
-        </div>
-        <div class="debug-row">
-          <span class="debug-label">Unknown media:</span>
-          <span id="debug-unknown-media" class="debug-val">0</span>
+          <span class="debug-label">Cache replaced:</span>
+          <span id="debug-cache-replaced" class="debug-val">--</span>
         </div>
         <div class="debug-row">
           <span class="debug-label">Selected source:</span>
           <span id="debug-source-label" class="debug-val">--</span>
         </div>
         <div class="debug-row">
-          <span class="debug-label">Final images:</span>
+          <span class="debug-label">Final authoritative images:</span>
           <span id="debug-final-count" class="debug-val">0</span>
         </div>
       </div>
@@ -419,10 +461,16 @@
         </div>
       </div>
 
-      <button id="btn-copy" class="btn-copy" type="button">
-        <span id="btn-copy-icon">📋</span>
-        <span id="btn-copy-text">Sao chép kết quả (JSON)</span>
-      </button>
+      <div style="display: flex; gap: 8px;">
+        <button id="btn-copy" class="btn-copy" type="button" style="flex: 1;">
+          <span id="btn-copy-icon">📋</span>
+          <span id="btn-copy-text">Sao chép kết quả (JSON)</span>
+        </button>
+        <button id="btn-rescan" class="btn-rescan" type="button" title="Quét lại toàn bộ bộ sưu tập">
+          <span>🔄</span>
+          <span>Quét lại</span>
+        </button>
+      </div>
 
       <!-- Images Preview Section -->
       <div id="gallery-section-wrapper" class="images-section">

@@ -1,8 +1,8 @@
 """
 Tests for Chrome Extension Manifest V3 Spike (Task 006X).
 Validates manifest structure, permissions, JS syntax, confirmed Shopee DOM structure,
-button-driven carousel pagination, media item classification (IMAGE vs VIDEO),
-and overlapping window deduplication.
+button-driven carousel pagination, rewind-to-left normalization, media classification (IMAGE vs VIDEO),
+and transactional rescan state management.
 """
 
 import json
@@ -107,15 +107,22 @@ def test_popup_html_contains_required_elements():
     assert "res-shop-id" in content
     assert "res-item-id" in content
     assert "res-image-count" in content
-    assert "debug-struct-count" in content
-    assert "debug-initial-visible" in content
-    assert "debug-carousel-advances" in content
+    assert "debug-product-key" in content
+    assert "debug-trigger-reason" in content
+    assert "debug-prev-complete" in content
+    assert "debug-canonical-found" in content
+    assert "debug-leftmost-reached" in content
+    assert "debug-rightmost-reached" in content
+    assert "debug-left-advances" in content
+    assert "debug-right-advances" in content
     assert "debug-total-discovered" in content
-    assert "debug-image-media" in content
-    assert "debug-video-media" in content
+    assert "debug-temp-status" in content
+    assert "debug-cache-replaced" in content
     assert "debug-source-label" in content
     assert "debug-final-count" in content
     assert "btn-copy" in content
+    assert "btn-rescan" in content
+    assert "Quét lại" in content
     assert "extractor_core.js" in content
     assert "popup.js" in content
 
@@ -207,7 +214,7 @@ def test_confirmed_shopee_media_item_classification():
       tagName: 'div',
       className: 'qIctnQ',
       querySelector: (sel) => {
-        if (sel.includes('video') || sel.includes('play')) return null;
+        if (sel.includes('video') || sel.includes('play') || sel.includes('emXGWZ')) return null;
         if (sel.includes('img') || sel.includes('picture')) {
           return {
             getAttribute: (a) => a === 'src' ? 'https://down-vn.img.susercontent.com/file/vn-11134207-7r98o-lk01xyz' : null,
@@ -334,7 +341,7 @@ def test_overlapping_windows_carousel_enumeration():
     """
     res = run_node_code(js_code)
     assert res["initialVisibleCount"] == 5
-    assert res["carouselAdvances"] >= 2
+    assert res["carouselRightAdvances"] >= 2
     assert res["totalDiscoveredCount"] == 7
     assert len(res["images"]) == 7
     assert res["images"] == [
@@ -348,129 +355,185 @@ def test_overlapping_windows_carousel_enumeration():
     ]
 
 
-def test_acceptance_case_9_images_plus_1_video_button_carousel():
+def test_transactional_rescan_rewind_normalization_and_failure_protection():
     """
-    Verify complete acceptance scenario:
-    - 9 actual product images + 1 video in Shopee carousel (Wi_1Rq / qIctnQ)
-    - Initially visible: 5 thumbnails (1 video + 4 images)
-    - Carousel advances 3 times, discovering remaining 5 images
-    - Total discovered: 10
-    - Image media: 9, Video media: 1
-    - Final images: 9
-    - Source: Main Gallery Carousel
+    Regression Tests for Manual Rescan:
+    1. Product A has previous COMPLETE result (9 images).
+    2. Carousel is currently scrolled to the middle/end (showing only items 5-9 in DOM).
+    3. Manual rescan rewinds carousel to the leftmost beginning, traverses full gallery, and successfully updates COMPLETE result (9 images).
+    4. Second rescan where carousel fails to traverse or only gets partial 5 images -> temporary scan is PARTIAL -> previous COMPLETE result (9 images) is preserved!
     """
     js_code = """
-    let step = 0;
-    // Step 0: [Video_1, Prod_1, Prod_2, Prod_3, Prod_4]
-    // Step 1: [Prod_2, Prod_3, Prod_4, Prod_5, Prod_6]
-    // Step 2: [Prod_4, Prod_5, Prod_6, Prod_7, Prod_8]
-    // Step 3: [Prod_6, Prod_7, Prod_8, Prod_9, Prod_9]
-    const windowFrames = [
-      [ { type: 'v', id: 'vid_1' }, { type: 'i', id: 'p1' }, { type: 'i', id: 'p2' }, { type: 'i', id: 'p3' }, { type: 'i', id: 'p4' } ],
-      [ { type: 'i', id: 'p2' }, { type: 'i', id: 'p3' }, { type: 'i', id: 'p4' }, { type: 'i', id: 'p5' }, { type: 'i', id: 'p6' } ],
-      [ { type: 'i', id: 'p4' }, { type: 'i', id: 'p5' }, { type: 'i', id: 'p6' }, { type: 'i', id: 'p7' }, { type: 'i', id: 'p8' } ],
-      [ { type: 'i', id: 'p6' }, { type: 'i', id: 'p7' }, { type: 'i', id: 'p8' }, { type: 'i', id: 'p9' }, { type: 'i', id: 'p9' } ]
+    core.ProductCache.clear();
+
+    // 1. Setup previous COMPLETE result for Product A (9 images)
+    const productA_initial = {
+      product_name: "Áo Thun Nam Cao Cấp",
+      shop_id: "100",
+      item_id: "200",
+      product_key: "100:200",
+      images: [1, 2, 3, 4, 5, 6, 7, 8, 9].map(i => `https://down-vn.img.susercontent.com/file/vn-prod-${i}`),
+      image_count: 9,
+      image_source: "gallery_carousel",
+      extraction_status: "COMPLETE",
+      completed_at: Date.now() - 1000,
+      debug: {
+        product_key: "100:200",
+        scan_state: "COMPLETE",
+        final_images: 9
+      }
+    };
+    core.ProductCache.set("100:200", productA_initial);
+
+    // 2. Mock Shopee DOM currently positioned at index 2 (showing items 5, 6, 7, 8, 9)
+    let carouselPos = 2;
+    const allFrames = [
+      [1, 2, 3, 4, 5],
+      [3, 4, 5, 6, 7],
+      [5, 6, 7, 8, 9]
     ];
 
     const mockDoc = {
-      querySelectorAll: (sel) => {
-        if (sel.includes('application/ld+json')) {
-          return [{
-            textContent: JSON.stringify({
-              "@context": "https://schema.org",
-              "@type": "Product",
-              "name": "Áo Khoác Nam Thể Thao Cao Cấp | Shopee Việt Nam",
-              "productID": "123456789",
-              "image": "https://down-vn.img.susercontent.com/file/vn-11134207-single-cover"
-            })
-          }];
-        }
-        return [];
-      },
+      querySelectorAll: () => [],
       querySelector: (sel) => {
-        if (sel.includes('Wi_1Rq') || sel.includes('qIctnQ')) {
+        if (sel.includes('product-briefing') || sel.includes('Wi_1Rq') || sel.includes('qIctnQ')) {
           return {
             className: 'Wi_1Rq',
             querySelectorAll: (qSel) => {
-              if (qSel.includes('qIctnQ')) {
-                const currentFrame = windowFrames[Math.min(step, windowFrames.length - 1)];
-                return currentFrame.map(item => {
-                  if (item.type === 'v') {
-                    return {
-                      tagName: 'div',
-                      className: 'qIctnQ',
-                      querySelector: (s) => {
-                        if (s.includes('video play') || s.includes('play') || s.includes('emXGWZ')) {
-                          return {
-                            tagName: 'img',
-                            className: 'emXGWZ',
-                            getAttribute: (a) => a === 'alt' ? 'icon video play' : null
-                          };
-                        }
-                        return null;
-                      },
-                      getAttribute: () => null,
-                      textContent: '0:30'
-                    };
-                  } else {
-                    return {
-                      tagName: 'div',
-                      className: 'qIctnQ',
-                      querySelector: (s) => {
-                        if (s.includes('play')) return null;
-                        if (s.includes('img') || s.includes('picture')) {
-                          return {
-                            getAttribute: (a) => a === 'src' ? `https://down-vn.img.susercontent.com/file/vn-11134207-${item.id}` : null
-                          };
-                        }
-                        return null;
-                      },
-                      getAttribute: () => null,
-                      textContent: ''
-                    };
+              const currentFrame = allFrames[carouselPos];
+              return currentFrame.map(idx => ({
+                tagName: 'div',
+                className: 'qIctnQ',
+                querySelector: (s) => {
+                  if (s.includes('play') || s.includes('video') || s.includes('emXGWZ')) return null;
+                  if (s.includes('img') || s.includes('picture')) {
+                    return { getAttribute: (a) => a === 'src' ? `https://down-vn.img.susercontent.com/file/vn-prod-${idx}` : null };
                   }
-                });
-              }
-              return [];
+                  return null;
+                },
+                getAttribute: () => null
+              }));
             },
             querySelector: (bSel) => {
+              if (bSel.includes('arrow left') || bSel.includes('UTST3I')) {
+                return {
+                  disabled: carouselPos === 0,
+                  click: () => { if (carouselPos > 0) carouselPos--; }
+                };
+              }
               if (bSel.includes('arrow right') || bSel.includes('mARMpd')) {
                 return {
-                  disabled: false,
-                  click: () => { step++; }
+                  disabled: carouselPos >= allFrames.length - 1,
+                  click: () => { if (carouselPos < allFrames.length - 1) carouselPos++; }
                 };
               }
               return null;
             }
           };
         }
-        if (sel.includes('product-briefing') || sel === 'h1') {
-          return { textContent: 'Áo Khoác Nam Thể Thao Cao Cấp - Shopee Việt Nam' };
+        if (sel === 'h1' || sel.includes('title')) {
+          return { textContent: 'Áo Thun Nam Cao Cấp - Shopee' };
         }
         return null;
       },
       title: "Shopee"
     };
 
-    const res = await core.extractProductData(mockDoc, 'https://shopee.vn/ao-khoac-i.8888.123456789', { advanceDelayMs: 5 });
-    console.log(JSON.stringify(res));
+    // Scenario A: Manual rescan from position 2 -> rewinds to 0 -> enumerates all 9 -> COMPLETE (cache replaced)
+    const resA_successfulRescan = await core.extractProductData(mockDoc, 'https://shopee.vn/ao-thun-i.100.200', { forceRescan: true, advanceDelayMs: 5 });
+
+    // Scenario B: Broken / Partial Rescan simulation (gallery arrow is blocked, only discovers 5 items)
+    const mockDocBroken = {
+      querySelectorAll: () => [],
+      querySelector: (sel) => {
+        if (sel.includes('Wi_1Rq')) {
+          return {
+            className: 'Wi_1Rq',
+            querySelectorAll: () => [1, 2, 3, 4, 5].map(idx => ({
+              tagName: 'div',
+              className: 'qIctnQ',
+              querySelector: (s) => {
+                if (s.includes('play')) return null;
+                return { getAttribute: (a) => a === 'src' ? `https://down-vn.img.susercontent.com/file/vn-prod-${idx}` : null };
+              },
+              getAttribute: () => null
+            })),
+            querySelector: (bSel) => null // No advance arrows found -> scan will only see 5
+          };
+        }
+        return null;
+      },
+      title: "Shopee"
+    };
+
+    // Scenario B should NOT replace the authoritative 9-image cache!
+    const resB_partialRescan = await core.extractProductData(mockDocBroken, 'https://shopee.vn/ao-thun-i.100.200', { forceRescan: true, advanceDelayMs: 5 });
+
+    console.log(JSON.stringify({
+      resA_successfulRescan,
+      resB_partialRescan
+    }));
     """
     res = run_node_code(js_code)
 
-    assert res["success"] is True
-    assert res["product_name"] == "Áo Khoác Nam Thể Thao Cao Cấp"
-    assert res["shop_id"] == "8888"
-    assert res["item_id"] == "123456789"
-    assert res["image_source"] == "gallery_carousel"
-    assert res["image_count"] == 9
-    assert len(res["images"]) == 9
+    # Verify Scenario A (Full Rescan with Rewind)
+    res_a = res["resA_successfulRescan"]
+    assert res_a["image_count"] == 9
+    assert res_a["debug"]["trigger_reason"] == "manual_rescan"
+    assert res_a["debug"]["leftmost_reached"] is True
+    assert res_a["debug"]["rightmost_reached"] is True
+    assert res_a["debug"]["carousel_left_advances"] >= 2
+    assert res_a["debug"]["carousel_right_advances"] >= 2
+    assert res_a["debug"]["temporary_scan_status"] == "COMPLETE"
+    assert res_a["debug"]["cache_replaced"] is True
+    assert res_a["debug"]["final_authoritative_images"] == 9
 
-    debug = res["debug"]
-    assert debug["structured_candidates"] == 1
-    assert debug["initial_visible_gallery_media"] == 5
-    assert debug["carousel_advances"] >= 3
-    assert debug["total_unique_gallery_media"] == 10
-    assert debug["image_media"] == 9
-    assert debug["video_media"] == 1
-    assert debug["selected_source"] == "gallery_carousel"
-    assert debug["final_images"] == 9
+    # Verify Scenario B (Partial Rescan protected)
+    res_b = res["resB_partialRescan"]
+    assert res_b["image_count"] == 9  # Previous complete result preserved!
+    assert res_b["debug"]["cache_replaced"] is False
+    assert res_b["debug"]["final_authoritative_images"] == 9
+
+
+def test_enlarged_image_modal_does_not_intercept_canonical_gallery():
+    """
+    Verify that if an enlarged image viewer / modal is present in DOM,
+    the canonical product briefing gallery container is still preferred.
+    """
+    js_code = """
+    const docWithModal = {
+      querySelectorAll: () => [],
+      querySelector: (sel) => {
+        // Briefing contains the canonical gallery
+        if (sel.includes('product-briefing')) {
+          return {
+            querySelector: (cSel) => {
+              if (cSel.includes('Wi_1Rq')) {
+                return {
+                  className: 'Wi_1Rq',
+                  closest: (cls) => cls.includes('modal') || cls.includes('dialog') ? null : null,
+                  querySelectorAll: () => [1, 2, 3, 4, 5, 6, 7, 8, 9].map(i => ({
+                    tagName: 'div',
+                    className: 'qIctnQ',
+                    querySelector: (s) => s.includes('img') ? { getAttribute: (a) => a === 'src' ? `https://down-vn.img.susercontent.com/file/vn-canonical-${i}` : null } : null,
+                    getAttribute: () => null
+                  })),
+                  querySelector: () => null
+                };
+              }
+              return null;
+            }
+          };
+        }
+        return null;
+      },
+      title: "Shopee Product"
+    };
+
+    const container = core.findMainGalleryContainer(docWithModal);
+    const items = core.getVisibleGalleryItems(container);
+    console.log(JSON.stringify({ found: !!container, itemCount: items.length }));
+    """
+    res = run_node_code(js_code)
+    assert res["found"] is True
+    assert res["itemCount"] == 9

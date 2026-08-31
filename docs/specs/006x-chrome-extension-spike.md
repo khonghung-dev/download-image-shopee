@@ -102,18 +102,38 @@ Shopee's product gallery thumbnail carousel is **NOT a scroll container** (`scro
 - **Left Arrow Button**: `<button class="shopee-icon-button ... UTST3I"><img alt="icon arrow left bold" ...></button>`.
 
 ### Button-Driven Carousel Enumeration (`enumerateCompleteGallery`)
-1. **Initial Capture**: Collects currently visible thumbnail items (`.qIctnQ`) in the carousel viewport (typically ~5 items).
-2. **Media Classification (`classifyGalleryMediaItem`)**:
+1. **Rewind Normalization (`rewindCarouselToBeginning`)**: Before advancing rightward, the engine moves the carousel LEFT repeatedly using `button img[alt*="arrow left bold" i]` / `button.UTST3I` until the leftmost position is confirmed. This guarantees enumeration always starts from index 0 regardless of whichever thumbnail window the user previously selected.
+2. **Initial Capture**: Collects currently visible thumbnail items (`.qIctnQ`) at the canonical beginning of the carousel.
+3. **Media Classification (`classifyGalleryMediaItem`)**:
    - `VIDEO`: Contains `img[alt*="video play" i]`, `img.emXGWZ`, `<video>`, or duration indicators (`0:30`). Video posters are strictly excluded from `images[]`.
    - `IMAGE`: Contains `img` / `<picture>` / background image.
    - `UNKNOWN`: Other non-image elements.
-3. **Carousel Advancement (`advanceCarousel`)**:
+4. **Carousel Advancement (`advanceCarousel`)**:
    - Finds right arrow button (`button img[alt*="arrow right bold" i]`, `button.mARMpd`).
    - If clickable and not disabled, triggers click to advance carousel.
    - Bounded delay (50–60ms) to allow Shopee DOM to render next thumbnail window.
    - Collects newly exposed `.qIctnQ` items and records them in memory preserving first-seen gallery order.
    - Handles overlapping windows (e.g. `[A,B,C,D,E]` -> `[B,C,D,E,F]` -> `[C,D,E,F,G]` -> `A,B,C,D,E,F,G`).
    - Terminates when advancing produces no new items, right button becomes disabled, or safety cap is reached.
+
+### Product-Level Cache & Transactional Rescan Architecture
+To prevent incidental UI mutations (such as a user clicking on a gallery thumbnail to view the large hero image) or failed/partial rescans from overwriting an authoritative complete result:
+
+1. **Product Identity Key**:
+   - Every product is uniquely keyed in memory: `productKey = `${shop_id}:${item_id}``.
+   - URL modifications involving tracking params (`?sp_atk=...`), variation selections, or sub-paths retain the same `productKey`.
+2. **Authoritative `COMPLETE` State**:
+   - When a full gallery traversal finishes with valid images, it is assigned `extraction_status: 'COMPLETE'`.
+   - Subsequent extraction calls for the same `productKey` immediately return the authoritative cached `COMPLETE` result without re-evaluating partial DOM snapshots.
+3. **Transactional Rescan Lifecycle**:
+   - When user clicks **[Quét lại]** (`forceRescan: true`), existing `COMPLETE` cache is NOT deleted upfront.
+   - A temporary full scan executes (`rewind left` -> `advance right`).
+   - If the temporary scan completes with `COMPLETE` quality, it atomically replaces the authoritative cache (`cache_replaced = true`).
+   - If the temporary scan is `PARTIAL` or `FAILED`, the temporary snapshot is discarded and the previous authoritative `COMPLETE` cache is preserved (`cache_replaced = false`).
+4. **Canonical Gallery vs Modal/Lightbox Isolation**:
+   - Gallery locator `findMainGalleryContainer` strictly isolates the canonical product briefing gallery and rejects elements inside modals, enlarged-image lightboxes (`[role="dialog"]`, `.shopee-modal`, `[class*="lightbox"]`), reviews, or recommendations.
+5. **Concurrency Guard**:
+   - In-flight scans track `activeScanningPromises` to prevent redundant concurrent enumerations for the same product.
 
 ### Source Priority & Arbitration (`chooseBestImageSource`)
 - **Main Gallery Carousel (`gallery_carousel`)**: Preferred primary source whenever the main gallery carousel is confidently identified and yields images.
@@ -143,15 +163,19 @@ Shopee's product gallery thumbnail carousel is **NOT a scroll container** (`scro
    - **Product Name** matching the page.
    - **Shop ID** and **Item ID** matching the listing.
    - **Diagnostic metrics**:
-     - `Structured candidates: X`
-     - `Initial visible gallery media: X`
-     - `Carousel advances: X`
-     - `Total unique gallery media discovered: X`
-     - `Image media: X`
-     - `Video media: X`
-     - `Unknown media: X`
+     - `Product key: X:Y`
+     - `Trigger reason: initial / manual_rescan / cached`
+     - `Previous COMPLETE images: X`
+     - `Canonical gallery found: yes/no`
+     - `Leftmost reached: yes/no`
+     - `Rightmost reached: yes/no`
+     - `Carousel left advances: X`
+     - `Carousel right advances: X`
+     - `Total unique media discovered: X`
+     - `Temporary scan status: COMPLETE/PARTIAL/FAILED`
+     - `Cache replaced: yes/no`
      - `Selected source: Main Gallery Carousel`
-     - `Final images: X`
+     - `Final authoritative images: X`
    - Gallery image previews displaying only genuine product photos (excluding video thumbnails).
 5. Click **[Copy Result]** / **[Sao chép kết quả (JSON)]**.
 6. Paste into a text editor and verify the structured JSON:
@@ -167,16 +191,19 @@ Shopee's product gallery thumbnail carousel is **NOT a scroll container** (`scro
      ],
      "image_source": "gallery_carousel",
      "debug": {
-       "structured_candidates": 1,
-       "initial_visible_gallery_media": 5,
-       "carousel_advances": 3,
-       "total_unique_gallery_media": 10,
-       "image_media": 9,
-       "video_media": 1,
-       "unknown_media": 0,
+       "trigger_reason": "manual_rescan",
+       "previous_complete_images": 9,
+       "canonical_gallery_found": "yes",
+       "leftmost_reached": "yes",
+       "rightmost_reached": "yes",
+       "carousel_left_advances": 2,
+       "carousel_right_advances": 3,
+       "total_unique_media": 10,
+       "temporary_scan_status": "COMPLETE",
+       "cache_replaced": "yes",
        "selected_source": "gallery_carousel",
        "selected_source_label": "Main Gallery Carousel",
-       "final_images": 9
+       "final_authoritative_images": 9
      }
    }
    ```

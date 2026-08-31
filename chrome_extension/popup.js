@@ -19,13 +19,17 @@
   const resGalleryGrid = document.getElementById('res-gallery-grid');
   const resUrlsList = document.getElementById('res-urls-list');
 
-  const debugStructCount = document.getElementById('debug-struct-count');
-  const debugInitialVisible = document.getElementById('debug-initial-visible');
-  const debugCarouselAdvances = document.getElementById('debug-carousel-advances');
+  const debugProductKey = document.getElementById('debug-product-key');
+  const debugTriggerReason = document.getElementById('debug-trigger-reason');
+  const debugPrevComplete = document.getElementById('debug-prev-complete');
+  const debugCanonicalFound = document.getElementById('debug-canonical-found');
+  const debugLeftmostReached = document.getElementById('debug-leftmost-reached');
+  const debugRightmostReached = document.getElementById('debug-rightmost-reached');
+  const debugLeftAdvances = document.getElementById('debug-left-advances');
+  const debugRightAdvances = document.getElementById('debug-right-advances');
   const debugTotalDiscovered = document.getElementById('debug-total-discovered');
-  const debugImageMedia = document.getElementById('debug-image-media');
-  const debugVideoMedia = document.getElementById('debug-video-media');
-  const debugUnknownMedia = document.getElementById('debug-unknown-media');
+  const debugTempStatus = document.getElementById('debug-temp-status');
+  const debugCacheReplaced = document.getElementById('debug-cache-replaced');
   const debugSourceLabel = document.getElementById('debug-source-label');
   const debugFinalCount = document.getElementById('debug-final-count');
   const galleryEmptyWarning = document.getElementById('gallery-empty-warning');
@@ -33,12 +37,15 @@
   const btnCopy = document.getElementById('btn-copy');
   const btnCopyText = document.getElementById('btn-copy-text');
   const btnCopyIcon = document.getElementById('btn-copy-icon');
+  const btnRescan = document.getElementById('btn-rescan');
 
   const btnToggleGallery = document.getElementById('btn-toggle-gallery');
   const galleryDrawer = document.getElementById('gallery-drawer');
   const galleryToggleIcon = document.getElementById('gallery-toggle-icon');
 
   let currentExtractedData = null;
+  let activeTabId = null;
+  let activeTabUrl = null;
 
   function showView(viewName) {
     stateLoading.classList.add('hidden');
@@ -66,32 +73,42 @@
        imageSource === 'structured_data' ? 'Structured Product Data' :
        imageSource === 'structured_single_fallback' ? 'Structured Single-Image Fallback' : 'None');
 
-    const structCandidates = debug.structured_candidates !== undefined ? debug.structured_candidates : 0;
-    const initialVisible = debug.initial_visible_gallery_media !== undefined ? debug.initial_visible_gallery_media : 0;
-    const advances = debug.carousel_advances !== undefined ? debug.carousel_advances : 0;
-    const totalDiscovered = debug.total_unique_gallery_media !== undefined ? debug.total_unique_gallery_media : images.length;
-    const imageMedia = debug.image_media !== undefined ? debug.image_media : images.length;
-    const videoMedia = debug.video_media !== undefined ? debug.video_media : 0;
-    const unknownMedia = debug.unknown_media !== undefined ? debug.unknown_media : 0;
+    const productKey = data.product_key || debug.product_key || `${data.shop_id || ''}:${data.item_id || ''}`;
+    const triggerReason = debug.trigger_reason || 'initial';
+    const prevComplete = debug.previous_complete_images !== undefined ? debug.previous_complete_images : 0;
+    const canonicalFound = debug.canonical_gallery_found !== undefined ? (debug.canonical_gallery_found ? 'yes' : 'no') : 'yes';
+    const leftmostReached = debug.leftmost_reached !== undefined ? (debug.leftmost_reached ? 'yes' : 'no') : 'yes';
+    const rightmostReached = debug.rightmost_reached !== undefined ? (debug.rightmost_reached ? 'yes' : 'no') : 'yes';
+    const leftAdvances = debug.carousel_left_advances !== undefined ? debug.carousel_left_advances : 0;
+    const rightAdvances = debug.carousel_right_advances !== undefined ? debug.carousel_right_advances : 0;
+    const totalDiscovered = debug.total_unique_media !== undefined ? debug.total_unique_media : images.length;
+    const tempStatus = debug.temporary_scan_status || data.extraction_status || 'COMPLETE';
+    const cacheReplaced = debug.cache_replaced !== undefined ? (debug.cache_replaced ? 'yes' : 'no') : 'yes';
+    const finalAuthoritative = debug.final_authoritative_images !== undefined ? debug.final_authoritative_images : images.length;
 
     currentExtractedData = {
       url: data.url || tabUrl,
       product_name: data.product_name || 'Không xác định',
       shop_id: data.shop_id || 'N/A',
       item_id: data.item_id || 'N/A',
+      product_key: productKey,
       images: images,
       image_source: imageSource,
+      extraction_status: tempStatus,
       debug: {
-        structured_candidates: structCandidates,
-        initial_visible_gallery_media: initialVisible,
-        carousel_advances: advances,
-        total_unique_gallery_media: totalDiscovered,
-        image_media: imageMedia,
-        video_media: videoMedia,
-        unknown_media: unknownMedia,
+        trigger_reason: triggerReason,
+        previous_complete_images: prevComplete,
+        canonical_gallery_found: canonicalFound,
+        leftmost_reached: leftmostReached,
+        rightmost_reached: rightmostReached,
+        carousel_left_advances: leftAdvances,
+        carousel_right_advances: rightAdvances,
+        total_unique_media: totalDiscovered,
+        temporary_scan_status: tempStatus,
+        cache_replaced: cacheReplaced,
         selected_source: imageSource,
         selected_source_label: sourceLabel,
-        final_images: images.length
+        final_authoritative_images: finalAuthoritative
       }
     };
 
@@ -101,15 +118,19 @@
     resImageCount.textContent = currentExtractedData.images.length;
 
     // Debug metadata display
-    debugStructCount.textContent = String(structCandidates);
-    debugInitialVisible.textContent = String(initialVisible);
-    debugCarouselAdvances.textContent = String(advances);
-    debugTotalDiscovered.textContent = String(totalDiscovered);
-    debugImageMedia.textContent = String(imageMedia);
-    debugVideoMedia.textContent = String(videoMedia);
-    debugUnknownMedia.textContent = String(unknownMedia);
-    debugSourceLabel.textContent = sourceLabel;
-    debugFinalCount.textContent = String(images.length);
+    if (debugProductKey) debugProductKey.textContent = productKey || '--';
+    if (debugTriggerReason) debugTriggerReason.textContent = triggerReason;
+    if (debugPrevComplete) debugPrevComplete.textContent = String(prevComplete);
+    if (debugCanonicalFound) debugCanonicalFound.textContent = canonicalFound;
+    if (debugLeftmostReached) debugLeftmostReached.textContent = leftmostReached;
+    if (debugRightmostReached) debugRightmostReached.textContent = rightmostReached;
+    if (debugLeftAdvances) debugLeftAdvances.textContent = String(leftAdvances);
+    if (debugRightAdvances) debugRightAdvances.textContent = String(rightAdvances);
+    if (debugTotalDiscovered) debugTotalDiscovered.textContent = String(totalDiscovered);
+    if (debugTempStatus) debugTempStatus.textContent = tempStatus;
+    if (debugCacheReplaced) debugCacheReplaced.textContent = cacheReplaced;
+    if (debugSourceLabel) debugSourceLabel.textContent = sourceLabel;
+    if (debugFinalCount) debugFinalCount.textContent = String(finalAuthoritative);
 
     // Empty gallery warning handling
     if (images.length === 0) {
@@ -152,6 +173,55 @@
     showView('success');
   }
 
+  async function performExtraction(forceRescan = false) {
+    showView('loading');
+
+    if (!activeTabId || !activeTabUrl) {
+      showView('not_shopee');
+      return;
+    }
+
+    try {
+      chrome.tabs.sendMessage(activeTabId, { action: 'EXTRACT_PRODUCT_DATA', forceRescan }, async (response) => {
+        if (!chrome.runtime.lastError && response && response.success && response.data) {
+          renderProductData(response.data, activeTabUrl);
+        } else {
+          // Fallback: Inject extractor script directly via chrome.scripting API if content script wasn't active
+          try {
+            if (chrome.scripting) {
+              const injectionResults = await chrome.scripting.executeScript({
+                target: { tabId: activeTabId },
+                func: async (rescanFlag) => {
+                  if (typeof ShopeeExtractorCore !== 'undefined') {
+                    return await ShopeeExtractorCore.extractProductData(document, window.location.href, { forceRescan: rescanFlag });
+                  }
+                  return null;
+                },
+                args: [forceRescan]
+              });
+
+              if (injectionResults && injectionResults[0] && injectionResults[0].result) {
+                renderProductData(injectionResults[0].result, activeTabUrl);
+                return;
+              }
+            }
+
+            errorMessage.textContent = 'Vui lòng tải lại trang sản phẩm Shopee và thử lại.';
+            showView('error');
+          } catch (injectErr) {
+            console.error('Fallback injection failed:', injectErr);
+            errorMessage.textContent = 'Không thể kết nối với tab Shopee hiện tại.';
+            showView('error');
+          }
+        }
+      });
+    } catch (err) {
+      console.error('Extraction dispatch failed:', err);
+      errorMessage.textContent = err.message || String(err);
+      showView('error');
+    }
+  }
+
   // Copy to clipboard handler
   btnCopy.addEventListener('click', async () => {
     if (!currentExtractedData) return;
@@ -188,6 +258,13 @@
     }
   });
 
+  // Manual Rescan button handler
+  if (btnRescan) {
+    btnRescan.addEventListener('click', () => {
+      performExtraction(true);
+    });
+  }
+
   // Toggle gallery accordion
   let isGalleryOpen = true;
   btnToggleGallery.addEventListener('click', () => {
@@ -214,48 +291,17 @@
         return;
       }
 
-      const tabUrl = activeTab.url;
+      activeTabId = activeTab.id;
+      activeTabUrl = activeTab.url;
       const core = typeof ShopeeExtractorCore !== 'undefined' ? ShopeeExtractorCore : null;
 
       // Check if domain is Shopee
-      if (core && !core.isShopeeDomain(tabUrl)) {
+      if (core && !core.isShopeeDomain(activeTabUrl)) {
         showView('not_shopee');
         return;
       }
 
-      // Try communicating with content script
-      chrome.tabs.sendMessage(activeTab.id, { action: 'EXTRACT_PRODUCT_DATA' }, async (response) => {
-        if (!chrome.runtime.lastError && response && response.success && response.data) {
-          renderProductData(response.data, tabUrl);
-        } else {
-          // Fallback: Inject extractor script directly via chrome.scripting API if content script wasn't active
-          try {
-            if (chrome.scripting) {
-              const injectionResults = await chrome.scripting.executeScript({
-                target: { tabId: activeTab.id },
-                func: async () => {
-                  if (typeof ShopeeExtractorCore !== 'undefined') {
-                    return await ShopeeExtractorCore.extractProductData(document, window.location.href);
-                  }
-                  return null;
-                }
-              });
-
-              if (injectionResults && injectionResults[0] && injectionResults[0].result) {
-                renderProductData(injectionResults[0].result, tabUrl);
-                return;
-              }
-            }
-
-            errorMessage.textContent = 'Vui lòng tải lại trang sản phẩm Shopee và thử lại.';
-            showView('error');
-          } catch (injectErr) {
-            console.error('Fallback injection failed:', injectErr);
-            errorMessage.textContent = 'Không thể kết nối với tab Shopee hiện tại.';
-            showView('error');
-          }
-        }
-      });
+      performExtraction(false);
     } catch (err) {
       console.error('Popup init failed:', err);
       errorMessage.textContent = err.message || String(err);

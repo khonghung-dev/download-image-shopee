@@ -1,7 +1,8 @@
 /**
  * Shopee Product Extractor - Core Extraction Engine
  * Manifest V3 compatible pure JavaScript engine for Shopee product pages.
- * Features button-driven carousel enumeration, media item classification (IMAGE vs VIDEO),
+ * Features button-driven carousel enumeration, canonical gallery normalization (rewind-to-left),
+ * transactional product caching, media item classification (IMAGE vs VIDEO),
  * and dual-source arbitration.
  */
 
@@ -461,8 +462,9 @@
   }
 
   /**
-   * Layered locator for the Shopee Main Product Gallery thumbnail carousel container.
+   * Layered locator for the Shopee Canonical Main Product Gallery thumbnail carousel container.
    * Verified structure: <div class="Wi_1Rq"> containing <div class="qIctnQ"> items and arrow buttons.
+   * Strictly avoids modals, enlarged-image lightboxes, reviews, and recommendations.
    *
    * @param {Document} doc
    * @returns {Element|null}
@@ -475,14 +477,27 @@
       if (el === doc.body || el === doc.documentElement) return true;
       if (el.classList && el.classList.contains && el.classList.contains('page-product')) return true;
       if (el.closest) {
-        if (el.closest('.shopee-product-rating, [class*="rating"], [class*="review"], [class*="recommend"], [class*="similar"], [class*="suggestion"], [class*="shop-info"], [class*="seller-profile"], [class*="product-detail"], footer, header')) {
+        if (el.closest('.shopee-product-rating, [class*="rating"], [class*="review"], [class*="recommend"], [class*="similar"], [class*="suggestion"], [class*="shop-info"], [class*="seller-profile"], [class*="product-detail"], [role="dialog"], .shopee-modal, [class*="lightbox"], [class*="modal"], [class*="enlarged-image"], [class*="image-viewer"], footer, header')) {
           return true;
         }
       }
       return false;
     }
 
-    // Layer 1: Confirmed Shopee Gallery Container class Wi_1Rq or container with qIctnQ items
+    // Layer 0: Canonical container inside top product briefing (Highest Confidence)
+    const briefing = doc.querySelector('div[class*="product-briefing"], section[class*="product-briefing"]');
+    if (briefing && !isUnwantedSection(briefing)) {
+      const canonicalInBriefing = briefing.querySelector('.Wi_1Rq, div[class*="Wi_1Rq"], .image-carousel, div[class*="image-carousel"]');
+      if (canonicalInBriefing && !isUnwantedSection(canonicalInBriefing)) {
+        return canonicalInBriefing;
+      }
+      const qInBriefing = briefing.querySelector('.qIctnQ, div[class*="qIctnQ"]');
+      if (qInBriefing && qInBriefing.parentElement && !isUnwantedSection(qInBriefing.parentElement)) {
+        return qInBriefing.parentElement;
+      }
+    }
+
+    // Layer 1: Confirmed Shopee Gallery Container class Wi_1Rq not in modal/lightbox
     const confirmedContainer = doc.querySelector('.Wi_1Rq, div[class*="Wi_1Rq"]');
     if (confirmedContainer && !isUnwantedSection(confirmedContainer)) {
       return confirmedContainer;
@@ -699,7 +714,7 @@
   }
 
   /**
-   * Locates the right arrow advancement button in the gallery carousel.
+   * Locates the right arrow button in the gallery carousel.
    * Verified: <button class="shopee-icon-button ... mARMpd"><img alt="icon arrow right bold" ...></button>
    *
    * @param {Element} container
@@ -708,7 +723,6 @@
   function getCarouselRightButton(container) {
     if (!container || typeof container.querySelector !== 'function') return null;
 
-    // Search inside container or immediate parent
     const searchScopes = [container, container.parentElement].filter(Boolean);
 
     for (const scope of searchScopes) {
@@ -729,6 +743,42 @@
       const buttons = scope.querySelectorAll ? scope.querySelectorAll('button.shopee-icon-button, button[class*="shopee-icon-button"]') : [];
       if (buttons.length >= 2) {
         return buttons[buttons.length - 1];
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Locates the left arrow button in the gallery carousel.
+   * Verified: <button class="shopee-icon-button ... UTST3I"><img alt="icon arrow left bold" ...></button>
+   *
+   * @param {Element} container
+   * @returns {Element|null}
+   */
+  function getCarouselLeftButton(container) {
+    if (!container || typeof container.querySelector !== 'function') return null;
+
+    const searchScopes = [container, container.parentElement].filter(Boolean);
+
+    for (const scope of searchScopes) {
+      if (typeof scope.querySelector !== 'function') continue;
+
+      // 1. By confirmed image alt text: img[alt*="arrow left bold" i], img[alt*="arrow left" i]
+      const arrowImg = scope.querySelector('img[alt*="arrow left bold" i], img[alt*="arrow left" i]');
+      if (arrowImg) {
+        const btn = arrowImg.closest ? arrowImg.closest('button') : (arrowImg.parentElement?.tagName?.toLowerCase() === 'button' ? arrowImg.parentElement : null);
+        if (btn) return btn;
+      }
+
+      // 2. By confirmed class UTST3I
+      const classBtn = scope.querySelector('button.UTST3I, button[class*="UTST3I"]');
+      if (classBtn) return classBtn;
+
+      // 3. By first icon button when multiple present
+      const buttons = scope.querySelectorAll ? scope.querySelectorAll('button.shopee-icon-button, button[class*="shopee-icon-button"]') : [];
+      if (buttons.length >= 2) {
+        return buttons[0];
       }
     }
 
@@ -777,13 +827,85 @@
   }
 
   /**
-   * Enumerates the complete Shopee product gallery by advancing the carousel buttons.
-   * Captures initial items, advances right button, collects newly exposed qIctnQ items,
-   * classifies IMAGE vs VIDEO, and deduplicates based on canonical image hashes.
+   * Normalizes the gallery carousel by repeatedly moving LEFT until confirmed at the beginning.
+   *
+   * @param {Element} container
+   * @param {{advanceDelayMs?: number, maxLeftAdvances?: number}} options
+   * @returns {Promise<{leftmostReached: boolean, leftAdvances: number}>}
+   */
+  async function rewindCarouselToBeginning(container, options = {}) {
+    const delayMs = options.advanceDelayMs !== undefined ? options.advanceDelayMs : 50;
+    const maxLeftAdvances = options.maxLeftAdvances || 15;
+
+    let leftAdvances = 0;
+    let noShiftStreak = 0;
+
+    function getLeftmostId() {
+      const items = getVisibleGalleryItems(container);
+      return items.length > 0 ? items[0].identity : '';
+    }
+
+    let prevFirstId = getLeftmostId();
+
+    while (leftAdvances < maxLeftAdvances) {
+      const leftBtn = getCarouselLeftButton(container);
+      if (!leftBtn) {
+        // No left button exists (already at start or single-page)
+        break;
+      }
+
+      if (leftBtn.disabled || (leftBtn.getAttribute && leftBtn.getAttribute('aria-disabled') === 'true')) {
+        break;
+      }
+
+      const style = (leftBtn.getAttribute ? leftBtn.getAttribute('style') : leftBtn.style) || '';
+      if (typeof style === 'string' && (style.includes('display: none') || style.includes('visibility: hidden'))) {
+        break;
+      }
+
+      // Trigger click on left arrow
+      try {
+        if (typeof leftBtn.click === 'function') {
+          leftBtn.click();
+        } else if (typeof leftBtn.dispatchEvent === 'function') {
+          leftBtn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+        }
+      } catch {
+        break;
+      }
+
+      leftAdvances++;
+
+      if (delayMs > 0) {
+        await delay(delayMs);
+      }
+
+      const currentFirstId = getLeftmostId();
+      if (currentFirstId === prevFirstId) {
+        noShiftStreak++;
+        if (noShiftStreak >= 2) {
+          // Reached leftmost position
+          break;
+        }
+      } else {
+        noShiftStreak = 0;
+        prevFirstId = currentFirstId;
+      }
+    }
+
+    return {
+      leftmostReached: true,
+      leftAdvances: leftAdvances
+    };
+  }
+
+  /**
+   * Enumerates the complete Shopee product gallery by normalizing to beginning (LEFT)
+   * and advancing rightward until the end.
    *
    * @param {Element} galleryContainer
    * @param {{advanceDelayMs?: number, maxAdvances?: number}} options
-   * @returns {Promise<{initialVisibleCount: number, carouselAdvances: number, totalDiscoveredCount: number, imageMediaCount: number, videoMediaCount: number, unknownMediaCount: number, images: string[]}>}
+   * @returns {Promise<{initialVisibleCount: number, carouselLeftAdvances: number, carouselRightAdvances: number, leftmostReached: boolean, rightmostReached: boolean, totalDiscoveredCount: number, imageMediaCount: number, videoMediaCount: number, unknownMediaCount: number, images: string[], scanQuality: 'COMPLETE'|'PARTIAL'|'FAILED'}>}
    */
   async function enumerateCompleteGallery(galleryContainer, options = {}) {
     const advanceDelay = options.advanceDelayMs !== undefined ? options.advanceDelayMs : 60;
@@ -791,17 +913,26 @@
 
     const emptyResult = {
       initialVisibleCount: 0,
-      carouselAdvances: 0,
+      carouselLeftAdvances: 0,
+      carouselRightAdvances: 0,
+      leftmostReached: false,
+      rightmostReached: false,
       totalDiscoveredCount: 0,
       imageMediaCount: 0,
       videoMediaCount: 0,
       unknownMediaCount: 0,
-      images: []
+      images: [],
+      scanQuality: 'FAILED'
     };
 
     if (!galleryContainer) return emptyResult;
 
-    // 1. Capture initial visible media items
+    // Step 1: Normalize carousel to the beginning (rewind left)
+    const rewindResult = await rewindCarouselToBeginning(galleryContainer, options);
+    const leftAdvances = rewindResult.leftAdvances;
+    const leftmostReached = rewindResult.leftmostReached;
+
+    // Step 2: Capture initial visible media items at leftmost position
     const initialItems = getVisibleGalleryItems(galleryContainer);
     const initialVisibleCount = initialItems.length;
 
@@ -823,15 +954,19 @@
 
     recordBatch(initialItems);
 
-    // 2. Advance carousel with right arrow button
-    let advanceCount = 0;
+    // Step 3: Advance carousel rightward until end
+    let rightAdvances = 0;
     let noNewStreak = 0;
+    let rightmostReached = false;
 
-    while (advanceCount < maxAdvances) {
+    while (rightAdvances < maxAdvances) {
       const advanced = advanceCarousel(galleryContainer);
-      if (!advanced) break;
+      if (!advanced) {
+        rightmostReached = true;
+        break;
+      }
 
-      advanceCount++;
+      rightAdvances++;
 
       // Wait briefly for DOM mutation / Shopee carousel update
       if (advanceDelay > 0) {
@@ -845,6 +980,7 @@
         noNewStreak++;
         if (noNewStreak >= 2) {
           // Reached end of carousel pagination
+          rightmostReached = true;
           break;
         }
       } else {
@@ -852,7 +988,11 @@
       }
     }
 
-    // 3. Classify and extract images
+    if (rightAdvances === 0) {
+      rightmostReached = true; // Single page carousel
+    }
+
+    // Step 4: Classify and extract images
     let imageMediaCount = 0;
     let videoMediaCount = 0;
     let unknownMediaCount = 0;
@@ -872,15 +1012,21 @@
     });
 
     const finalImages = deduplicateGalleryImages(rawImageUrls);
+    const isComplete = leftmostReached && rightmostReached && finalImages.length > 0;
+    const scanQuality = isComplete ? 'COMPLETE' : (finalImages.length > 0 ? 'PARTIAL' : 'FAILED');
 
     return {
       initialVisibleCount: initialVisibleCount,
-      carouselAdvances: advanceCount,
+      carouselLeftAdvances: leftAdvances,
+      carouselRightAdvances: rightAdvances,
+      leftmostReached: leftmostReached,
+      rightmostReached: rightmostReached,
       totalDiscoveredCount: orderedDiscovered.length,
       imageMediaCount: imageMediaCount,
       videoMediaCount: videoMediaCount,
       unknownMediaCount: unknownMediaCount,
-      images: finalImages
+      images: finalImages,
+      scanQuality: scanQuality
     };
   }
 
@@ -889,18 +1035,22 @@
    *
    * @param {Document} doc
    * @param {{advanceDelayMs?: number, maxAdvances?: number}} options
-   * @returns {Promise<{found: boolean, images: string[], initialVisibleCount: number, carouselAdvances: number, totalDiscoveredCount: number, imageMediaCount: number, videoMediaCount: number, unknownMediaCount: number}>}
+   * @returns {Promise<{found: boolean, images: string[], initialVisibleCount: number, carouselLeftAdvances: number, carouselRightAdvances: number, leftmostReached: boolean, rightmostReached: boolean, totalDiscoveredCount: number, imageMediaCount: number, videoMediaCount: number, unknownMediaCount: number, scanQuality: 'COMPLETE'|'PARTIAL'|'FAILED'}>}
    */
   async function extractMainGalleryImages(doc, options = {}) {
     const emptyResult = {
       found: false,
       images: [],
       initialVisibleCount: 0,
-      carouselAdvances: 0,
+      carouselLeftAdvances: 0,
+      carouselRightAdvances: 0,
+      leftmostReached: false,
+      rightmostReached: false,
       totalDiscoveredCount: 0,
       imageMediaCount: 0,
       videoMediaCount: 0,
-      unknownMediaCount: 0
+      unknownMediaCount: 0,
+      scanQuality: 'FAILED'
     };
 
     const container = findMainGalleryContainer(doc);
@@ -912,11 +1062,15 @@
       found: enumResult.images.length > 0,
       images: enumResult.images,
       initialVisibleCount: enumResult.initialVisibleCount,
-      carouselAdvances: enumResult.carouselAdvances,
+      carouselLeftAdvances: enumResult.carouselLeftAdvances,
+      carouselRightAdvances: enumResult.carouselRightAdvances,
+      leftmostReached: enumResult.leftmostReached,
+      rightmostReached: enumResult.rightmostReached,
       totalDiscoveredCount: enumResult.totalDiscoveredCount,
       imageMediaCount: enumResult.imageMediaCount,
       videoMediaCount: enumResult.videoMediaCount,
-      unknownMediaCount: enumResult.unknownMediaCount
+      unknownMediaCount: enumResult.unknownMediaCount,
+      scanQuality: enumResult.scanQuality
     };
   }
 
@@ -925,8 +1079,8 @@
    * selecting Main Gallery Carousel as the preferred authentic source.
    *
    * @param {{found: boolean, images: string[], rawCandidateCount: number}} structuredResult
-   * @param {{found: boolean, images: string[], initialVisibleCount: number, carouselAdvances: number, totalDiscoveredCount: number, imageMediaCount: number, videoMediaCount: number, unknownMediaCount: number}} galleryResult
-   * @returns {{selectedSource: string, selectedSourceLabel: string, images: string[], structuredCandidates: number, initialGalleryCount: number, carouselAdvances: number, totalDiscoveredGalleryCount: number, imageMediaCount: number, videoMediaCount: number, unknownMediaCount: number, finalCount: number}}
+   * @param {{found: boolean, images: string[], initialVisibleCount: number, carouselLeftAdvances: number, carouselRightAdvances: number, leftmostReached: boolean, rightmostReached: boolean, totalDiscoveredCount: number, imageMediaCount: number, videoMediaCount: number, unknownMediaCount: number, scanQuality: string}} galleryResult
+   * @returns {{selectedSource: string, selectedSourceLabel: string, images: string[], structuredCandidates: number, initialGalleryCount: number, carouselLeftAdvances: number, carouselRightAdvances: number, leftmostReached: boolean, rightmostReached: boolean, totalDiscoveredGalleryCount: number, imageMediaCount: number, videoMediaCount: number, unknownMediaCount: number, finalCount: number, scanQuality: string}}
    */
   function chooseBestImageSource(structuredResult, galleryResult) {
     const structImgs = structuredResult?.images || [];
@@ -935,11 +1089,15 @@
     const galCount = galImgs.length;
 
     const initialGallery = galleryResult?.initialVisibleCount || galCount;
-    const advances = galleryResult?.carouselAdvances || 0;
+    const leftAdvances = galleryResult?.carouselLeftAdvances || 0;
+    const rightAdvances = galleryResult?.carouselRightAdvances || 0;
+    const leftmost = galleryResult?.leftmostReached !== undefined ? galleryResult.leftmostReached : true;
+    const rightmost = galleryResult?.rightmostReached !== undefined ? galleryResult.rightmostReached : true;
     const totalDiscovered = galleryResult?.totalDiscoveredCount || galCount;
     const imageMedia = galleryResult?.imageMediaCount || galCount;
     const videoMedia = galleryResult?.videoMediaCount || 0;
     const unknownMedia = galleryResult?.unknownMediaCount || 0;
+    const scanQuality = galleryResult?.scanQuality || (galCount > 0 ? 'COMPLETE' : 'FAILED');
 
     // Case 1: Main Gallery Carousel has images -> Preferred source
     if (galCount > 0) {
@@ -949,12 +1107,16 @@
         images: galImgs,
         structuredCandidates: structCount,
         initialGalleryCount: initialGallery,
-        carouselAdvances: advances,
+        carouselLeftAdvances: leftAdvances,
+        carouselRightAdvances: rightAdvances,
+        leftmostReached: leftmost,
+        rightmostReached: rightmost,
         totalDiscoveredGalleryCount: totalDiscovered,
         imageMediaCount: imageMedia,
         videoMediaCount: videoMedia,
         unknownMediaCount: unknownMedia,
-        finalCount: galCount
+        finalCount: galCount,
+        scanQuality: scanQuality
       };
     }
 
@@ -966,12 +1128,16 @@
         images: structImgs,
         structuredCandidates: structCount,
         initialGalleryCount: 0,
-        carouselAdvances: 0,
+        carouselLeftAdvances: 0,
+        carouselRightAdvances: 0,
+        leftmostReached: true,
+        rightmostReached: true,
         totalDiscoveredGalleryCount: 0,
         imageMediaCount: 0,
         videoMediaCount: 0,
         unknownMediaCount: 0,
-        finalCount: structCount
+        finalCount: structCount,
+        scanQuality: 'COMPLETE'
       };
     }
 
@@ -983,12 +1149,16 @@
         images: structImgs,
         structuredCandidates: 1,
         initialGalleryCount: 0,
-        carouselAdvances: 0,
+        carouselLeftAdvances: 0,
+        carouselRightAdvances: 0,
+        leftmostReached: true,
+        rightmostReached: true,
         totalDiscoveredGalleryCount: 0,
         imageMediaCount: 0,
         videoMediaCount: 0,
         unknownMediaCount: 0,
-        finalCount: 1
+        finalCount: 1,
+        scanQuality: 'PARTIAL'
       };
     }
 
@@ -999,12 +1169,16 @@
       images: [],
       structuredCandidates: 0,
       initialGalleryCount: 0,
-      carouselAdvances: 0,
+      carouselLeftAdvances: 0,
+      carouselRightAdvances: 0,
+      leftmostReached: false,
+      rightmostReached: false,
       totalDiscoveredGalleryCount: 0,
       imageMediaCount: 0,
       videoMediaCount: 0,
       unknownMediaCount: 0,
-      finalCount: 0
+      finalCount: 0,
+      scanQuality: 'FAILED'
     };
   }
 
@@ -1018,9 +1192,13 @@
     if (structuredName) return cleanProductName(structuredName);
     if (!doc || !doc.querySelector) return '';
 
-    const ogTitle = doc.querySelector('meta[property="og:title"]')?.getAttribute('content') ||
-      doc.querySelector('meta[name="twitter:title"]')?.getAttribute('content');
+    const ogEl = doc.querySelector('meta[property="og:title"]');
+    const ogTitle = (ogEl && typeof ogEl.getAttribute === 'function') ? ogEl.getAttribute('content') : (ogEl?.content || '');
     if (ogTitle) return cleanProductName(ogTitle);
+
+    const twEl = doc.querySelector('meta[name="twitter:title"]');
+    const twTitle = (twEl && typeof twEl.getAttribute === 'function') ? twEl.getAttribute('content') : (twEl?.content || '');
+    if (twTitle) return cleanProductName(twTitle);
 
     const titleSelectors = [
       'div[class*="product-briefing"] h1',
@@ -1049,55 +1227,195 @@
   }
 
   /**
-   * Main unified extraction pipeline with button-driven carousel enumeration and diagnostic metrics.
+   * Generates a stable product key based on shop_id and item_id.
+   * @param {string} shopId
+   * @param {string} itemId
+   * @returns {string}
+   */
+  function createProductKey(shopId, itemId) {
+    if (shopId && itemId) return `${shopId}:${itemId}`;
+    if (itemId) return `item:${itemId}`;
+    return '';
+  }
+
+  // In-memory Product Level Cache & In-flight scan promises
+  const productCache = new Map();
+  const activeScanningPromises = new Map();
+
+  const ProductCache = {
+    get(productKey) {
+      if (!productKey) return null;
+      return productCache.get(productKey) || null;
+    },
+    set(productKey, data) {
+      if (!productKey || !data) return;
+      productCache.set(productKey, data);
+    },
+    hasComplete(productKey) {
+      if (!productKey) return false;
+      const entry = productCache.get(productKey);
+      return !!(entry && entry.extraction_status === 'COMPLETE' && Array.isArray(entry.images) && entry.images.length > 0);
+    },
+    invalidate(productKey) {
+      if (productKey) {
+        productCache.delete(productKey);
+        activeScanningPromises.delete(productKey);
+      } else {
+        productCache.clear();
+        activeScanningPromises.clear();
+      }
+    },
+    clear() {
+      productCache.clear();
+      activeScanningPromises.clear();
+    }
+  };
+
+  /**
+   * Main unified extraction pipeline with button-driven carousel enumeration,
+   * canonical rewind-to-beginning normalization, transactional product caching,
+   * and complete-vs-partial state protection.
    *
    * @param {Document} doc
    * @param {string} url
-   * @param {{advanceDelayMs?: number, maxAdvances?: number}} options
+   * @param {{advanceDelayMs?: number, maxAdvances?: number, forceRescan?: boolean}} options
    * @returns {Promise<object>} Structured product result
    */
   async function extractProductData(doc, url, options = {}) {
     const urlInfo = parseShopeeUrl(url);
+    const initialKey = createProductKey(urlInfo.shopId, urlInfo.itemId);
+    const forceRescan = options.forceRescan === true;
+    const previousComplete = initialKey ? ProductCache.get(initialKey) : null;
+    const previousImageCount = previousComplete?.images ? previousComplete.images.length : 0;
 
-    // 1. Extract candidates independently from BOTH sources
-    const structuredResult = extractStructuredProductImages(doc, urlInfo);
-    const galleryResult = await extractMainGalleryImages(doc, options);
+    // 1. If not forcing a rescan and we already have an authoritative COMPLETE result, return it immediately
+    if (!forceRescan && initialKey && ProductCache.hasComplete(initialKey)) {
+      return {
+        ...previousComplete,
+        debug: {
+          ...previousComplete.debug,
+          full_scan_triggered: false,
+          trigger_reason: 'cached',
+          scan_state: 'COMPLETE',
+          previous_complete_images: previousImageCount,
+          cache_replaced: false,
+          final_authoritative_images: previousImageCount
+        }
+      };
+    }
 
-    // 2. Select the most complete and authentic source
-    const bestSource = chooseBestImageSource(structuredResult, galleryResult);
+    // 2. Concurrency Guard: If a scan is already running for this productKey, await it
+    if (initialKey && activeScanningPromises.has(initialKey)) {
+      return await activeScanningPromises.get(initialKey);
+    }
 
-    // 3. Resolve Product Name and IDs
-    const productName = resolveProductName(doc, structuredResult.productName);
-    const shopId = urlInfo.shopId || structuredResult.shopId || '';
-    const itemId = urlInfo.itemId || structuredResult.itemId || '';
+    // 3. Transactional Full Scan Promise
+    const scanPromise = (async () => {
+      // Step A: Extract candidates independently from BOTH sources
+      const structuredResult = extractStructuredProductImages(doc, urlInfo);
+      const galleryResult = await extractMainGalleryImages(doc, options);
 
-    const isShopeePage = urlInfo.isShopee;
-    const isSupportedProduct = isShopeePage && (productName.length > 0 || itemId.length > 0 || bestSource.images.length > 0);
+      // Step B: Select the most complete and authentic source
+      const bestSource = chooseBestImageSource(structuredResult, galleryResult);
 
-    return {
-      success: isSupportedProduct,
-      is_shopee: isShopeePage,
-      is_product_page: isSupportedProduct,
-      url: url,
-      product_name: productName,
-      shop_id: shopId,
-      item_id: itemId,
-      images: bestSource.images,
-      image_count: bestSource.images.length,
-      image_source: bestSource.selectedSource,
-      debug: {
-        structured_candidates: bestSource.structuredCandidates,
-        initial_visible_gallery_media: bestSource.initialGalleryCount,
-        carousel_advances: bestSource.carouselAdvances,
-        total_unique_gallery_media: bestSource.totalDiscoveredGalleryCount,
-        image_media: bestSource.imageMediaCount,
-        video_media: bestSource.videoMediaCount,
-        unknown_media: bestSource.unknownMediaCount,
-        selected_source: bestSource.selectedSource,
-        selected_source_label: bestSource.selectedSourceLabel,
-        final_images: bestSource.finalCount
+      // Step C: Resolve Product Name and IDs
+      const productName = resolveProductName(doc, structuredResult.productName);
+      const shopId = urlInfo.shopId || structuredResult.shopId || '';
+      const itemId = urlInfo.itemId || structuredResult.itemId || '';
+      const resolvedKey = createProductKey(shopId, itemId) || initialKey;
+
+      const isShopeePage = urlInfo.isShopee;
+      const isSupportedProduct = isShopeePage && (productName.length > 0 || itemId.length > 0 || bestSource.images.length > 0);
+
+      // Scan quality assessment
+      const scanQuality = bestSource.scanQuality || (bestSource.images.length > 0 ? 'COMPLETE' : (isSupportedProduct ? 'FAILED' : 'IDLE'));
+      const isScanComplete = scanQuality === 'COMPLETE';
+
+      const temporaryScanResult = {
+        success: isSupportedProduct,
+        is_shopee: isShopeePage,
+        is_product_page: isSupportedProduct,
+        url: url,
+        product_name: productName,
+        shop_id: shopId,
+        item_id: itemId,
+        product_key: resolvedKey,
+        images: bestSource.images,
+        image_count: bestSource.images.length,
+        image_source: bestSource.selectedSource,
+        extraction_status: scanQuality,
+        completed_at: Date.now(),
+        debug: {
+          trigger_reason: forceRescan ? 'manual_rescan' : (resolvedKey ? 'initial' : 'product_changed'),
+          previous_complete_images: previousImageCount,
+          canonical_gallery_found: galleryResult.found,
+          leftmost_reached: bestSource.leftmostReached,
+          rightmost_reached: bestSource.rightmostReached,
+          carousel_left_advances: bestSource.carouselLeftAdvances,
+          carousel_right_advances: bestSource.carouselRightAdvances,
+          total_unique_media: bestSource.totalDiscoveredGalleryCount,
+          temporary_scan_status: scanQuality,
+          cache_replaced: isScanComplete,
+          final_authoritative_images: isScanComplete ? bestSource.finalCount : (previousImageCount || bestSource.finalCount),
+          product_key: resolvedKey || 'N/A',
+          scan_state: scanQuality,
+          full_scan_triggered: true,
+          structured_candidates: bestSource.structuredCandidates,
+          initial_visible_gallery_media: bestSource.initialGalleryCount,
+          image_media: bestSource.imageMediaCount,
+          video_media: bestSource.videoMediaCount,
+          unknown_media: bestSource.unknownMediaCount,
+          selected_source: bestSource.selectedSource,
+          selected_source_label: bestSource.selectedSourceLabel,
+          final_images: bestSource.finalCount
+        }
+      };
+
+      // Step D: Transactional Cache Resolution
+      if (isScanComplete) {
+        // Successful COMPLETE scan replaces authoritative cache
+        if (resolvedKey) {
+          ProductCache.set(resolvedKey, temporaryScanResult);
+        }
+        return temporaryScanResult;
+      } else {
+        // Temporary scan was PARTIAL or FAILED:
+        // If a previous COMPLETE cache exists for this product, preserve it!
+        if (resolvedKey && ProductCache.hasComplete(resolvedKey)) {
+          const authoritative = ProductCache.get(resolvedKey);
+          return {
+            ...authoritative,
+            debug: {
+              ...authoritative.debug,
+              trigger_reason: forceRescan ? 'manual_rescan' : 'partial_fallback_prevented',
+              previous_complete_images: previousImageCount,
+              canonical_gallery_found: galleryResult.found,
+              leftmost_reached: bestSource.leftmostReached,
+              rightmost_reached: bestSource.rightmostReached,
+              carousel_left_advances: bestSource.carouselLeftAdvances,
+              carousel_right_advances: bestSource.carouselRightAdvances,
+              total_unique_media: bestSource.totalDiscoveredGalleryCount,
+              temporary_scan_status: scanQuality,
+              cache_replaced: false,
+              final_authoritative_images: authoritative.images.length
+            }
+          };
+        }
+        return temporaryScanResult;
       }
-    };
+    })();
+
+    if (initialKey) {
+      activeScanningPromises.set(initialKey, scanPromise);
+    }
+
+    try {
+      return await scanPromise;
+    } finally {
+      if (initialKey) {
+        activeScanningPromises.delete(initialKey);
+      }
+    }
   }
 
   return {
@@ -1118,11 +1436,15 @@
     getMediaIdentity,
     getVisibleGalleryItems,
     getCarouselRightButton,
+    getCarouselLeftButton,
     advanceCarousel,
+    rewindCarouselToBeginning,
     enumerateCompleteGallery,
     extractMainGalleryImages,
     chooseBestImageSource,
     resolveProductName,
+    createProductKey,
+    ProductCache,
     extractProductData
   };
 });

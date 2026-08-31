@@ -22,7 +22,8 @@
             }
 
             const currentUrl = window.location.href;
-            const extractedData = await core.extractProductData(document, currentUrl);
+            const forceRescan = !!(request && request.forceRescan);
+            const extractedData = await core.extractProductData(document, currentUrl, { forceRescan });
 
             sendResponse({
               success: true,
