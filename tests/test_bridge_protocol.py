@@ -1,320 +1,219 @@
-"""Unit tests for Bridge Protocol definitions and validation."""
+"""Tests for the active Native Host ↔ desktop protocol."""
 
 import json
-import pytest
 
 from shopee_image_downloader.core.bridge_protocol import (
-    CLIENT_IDENTIFIER,
     MAX_MESSAGE_SIZE,
+    MSG_TYPE_BATCH_FINISHED,
+    MSG_TYPE_CANCEL_PROCESSING,
     MSG_TYPE_ERROR,
     MSG_TYPE_HELLO,
     MSG_TYPE_HELLO_ACK,
+    MSG_TYPE_OPEN_PRODUCT,
+    MSG_TYPE_PROCESS_ERROR,
+    MSG_TYPE_PROCESS_PROGRESS,
     MSG_TYPE_PRODUCT_RESULT,
     MSG_TYPE_PRODUCT_RESULT_ACK,
     PROTOCOL_VERSION,
     BridgeProductData,
+    create_batch_finished_message,
+    create_cancel_processing_message,
     create_error_message,
     create_hello_ack_message,
-    create_hello_message,
+    create_open_product_message,
     create_product_result_ack_message,
     parse_bridge_product_data,
     validate_incoming_message,
 )
 
-
-def test_create_messages():
-    """Test protocol message creation helpers."""
-    hello = json.loads(create_hello_message())
-    assert hello["type"] == MSG_TYPE_HELLO
-    assert hello["protocol_version"] == PROTOCOL_VERSION
-    assert hello["client"] == CLIENT_IDENTIFIER
-
-    hello_ack = json.loads(create_hello_ack_message())
-    assert hello_ack["type"] == MSG_TYPE_HELLO_ACK
-    assert hello_ack["protocol_version"] == PROTOCOL_VERSION
-
-    prod_ack = json.loads(create_product_result_ack_message(True, "OK"))
-    assert prod_ack["type"] == MSG_TYPE_PRODUCT_RESULT_ACK
-    assert prod_ack["success"] is True
-    assert prod_ack["message"] == "OK"
-
-    err_msg = json.loads(create_error_message("Something went wrong"))
-    assert err_msg["type"] == MSG_TYPE_ERROR
-    assert err_msg["error"] == "Something went wrong"
+NATIVE_HOST_CLIENT = "shopee_chrome_extension"
 
 
-def test_validate_valid_hello():
-    """Test validation of valid hello handshake."""
-    msg = json.dumps({
-        "type": MSG_TYPE_HELLO,
+def _incoming(message_type: str, **fields: object) -> str:
+    return json.dumps({
+        "type": message_type,
         "protocol_version": PROTOCOL_VERSION,
-        "client": CLIENT_IDENTIFIER,
+        **fields,
     })
-    is_valid, parsed, err = validate_incoming_message(msg)
-    assert is_valid is True
-    assert parsed is not None
-    assert parsed["client"] == CLIENT_IDENTIFIER
-    assert err is None
 
 
-def test_validate_valid_hello_bytes():
-    """Test validation with UTF-8 encoded bytes."""
-    msg_bytes = json.dumps({
-        "type": MSG_TYPE_HELLO,
-        "protocol_version": PROTOCOL_VERSION,
-        "client": CLIENT_IDENTIFIER,
-    }).encode("utf-8")
-    is_valid, parsed, err = validate_incoming_message(msg_bytes)
-    assert is_valid is True
-    assert parsed is not None
-    assert err is None
-
-
-def test_validate_valid_product_result():
-    """Test validation and parsing of valid product_result message."""
-    raw_payload = {
-        "type": MSG_TYPE_PRODUCT_RESULT,
-        "protocol_version": PROTOCOL_VERSION,
-        "data": {
-            "url": "https://shopee.vn/product/12345/67890",
-            "product_name": "Áo thun cotton cao cấp",
-            "shop_id": "12345",
-            "item_id": "67890",
-            "images": [
-                "https://down-vn.img.susercontent.com/file/img1.jpg",
-                "https://down-vn.img.susercontent.com/file/img2.jpg",
-            ],
-        },
+def _product_payload(images: list[str] | None = None) -> dict[str, object]:
+    image_urls = images or [
+        "https://down-vn.img.susercontent.com/file/img1.jpg",
+        "https://down-vn.img.susercontent.com/file/img2.jpg",
+    ]
+    return {
+        "url": "https://shopee.vn/product/12345/67890",
+        "product_name": "Áo thun cotton cao cấp",
+        "shop_id": "12345",
+        "item_id": "67890",
+        "images": image_urls,
+        "image_count": len(image_urls),
     }
-    is_valid, parsed, err = validate_incoming_message(json.dumps(raw_payload))
-    assert is_valid is True
+
+
+def test_active_desktop_outbound_message_builders() -> None:
+    hello_ack = json.loads(create_hello_ack_message())
+    assert hello_ack == {
+        "type": MSG_TYPE_HELLO_ACK,
+        "protocol_version": PROTOCOL_VERSION,
+    }
+
+    product_ack = json.loads(create_product_result_ack_message(True, "OK"))
+    assert product_ack["type"] == MSG_TYPE_PRODUCT_RESULT_ACK
+    assert product_ack["success"] is True
+    assert product_ack["message"] == "OK"
+
+    open_product = json.loads(create_open_product_message("req-1", "https://shopee.vn/item"))
+    assert open_product["type"] == MSG_TYPE_OPEN_PRODUCT
+    assert open_product["request_id"] == "req-1"
+
+    cancel = json.loads(create_cancel_processing_message("req-1"))
+    assert cancel["type"] == MSG_TYPE_CANCEL_PROCESSING
+    assert cancel["request_id"] == "req-1"
+
+    finished = json.loads(create_batch_finished_message(2, 1))
+    assert finished["type"] == MSG_TYPE_BATCH_FINISHED
+    assert finished["success_count"] == 2
+    assert finished["fail_count"] == 1
+
+    error = json.loads(create_error_message("bad message"))
+    assert error["type"] == MSG_TYPE_ERROR
+
+
+def test_validate_native_host_hello_as_text_and_bytes() -> None:
+    message = _incoming(MSG_TYPE_HELLO, client=NATIVE_HOST_CLIENT)
+    for raw in (message, message.encode("utf-8")):
+        valid, parsed, error = validate_incoming_message(raw)
+        assert valid is True
+        assert parsed is not None
+        assert parsed["client"] == NATIVE_HOST_CLIENT
+        assert error is None
+
+
+def test_validate_progress_and_error_from_extension() -> None:
+    progress = _incoming(MSG_TYPE_PROCESS_PROGRESS, request_id="req-1", stage="waiting_page")
+    valid, parsed, error = validate_incoming_message(progress)
+    assert valid is True
+    assert parsed is not None and parsed["stage"] == "waiting_page"
+    assert error is None
+
+    process_error = _incoming(
+        MSG_TYPE_PROCESS_ERROR,
+        request_id="req-1",
+        url="https://shopee.vn/item",
+        error_code="PRODUCT_TIMEOUT",
+        message="Timed out",
+    )
+    valid, parsed, error = validate_incoming_message(process_error)
+    assert valid is True
+    assert parsed is not None and parsed["error_code"] == "PRODUCT_TIMEOUT"
+    assert error is None
+
+
+def test_validate_and_parse_product_result() -> None:
+    raw = _incoming(MSG_TYPE_PRODUCT_RESULT, request_id="req-1", data=_product_payload())
+    valid, parsed, error = validate_incoming_message(raw)
+    assert valid is True
     assert parsed is not None
-    assert err is None
+    assert error is None
 
-    product_data = parse_bridge_product_data(parsed)
-    assert isinstance(product_data, BridgeProductData)
-    assert product_data.url == "https://shopee.vn/product/12345/67890"
-    assert product_data.product_name == "Áo thun cotton cao cấp"
-    assert product_data.shop_id == "12345"
-    assert product_data.item_id == "67890"
-    assert len(product_data.images) == 2
-    assert product_data.product_key == "12345:67890"
-
-
-def test_validate_malformed_json():
-    """Test rejection of malformed JSON strings."""
-    is_valid, parsed, err = validate_incoming_message("NOT_JSON_DATA{}}")
-    assert is_valid is False
-    assert parsed is None
-    assert "JSON không hợp lệ" in err
+    product = parse_bridge_product_data(parsed)
+    assert isinstance(product, BridgeProductData)
+    assert product.url == "https://shopee.vn/product/12345/67890"
+    assert product.product_name == "Áo thun cotton cao cấp"
+    assert product.product_key == "12345:67890"
+    assert product.request_id == "req-1"
+    assert product.image_count == 2
 
 
-def test_validate_empty_message():
-    """Test rejection of empty or None message."""
-    is_valid, parsed, err = validate_incoming_message(None)
-    assert is_valid is False
-    assert "trống" in err
+def test_reject_malformed_empty_oversized_and_wrong_version_messages() -> None:
+    valid, _, error = validate_incoming_message("NOT_JSON_DATA{}}")
+    assert valid is False and "JSON không hợp lệ" in str(error)
 
-    is_valid, parsed, err = validate_incoming_message("")
-    assert is_valid is False
+    for raw in (None, ""):
+        valid, _, _ = validate_incoming_message(raw)
+        assert valid is False
 
+    valid, _, error = validate_incoming_message("a" * (MAX_MESSAGE_SIZE + 100))
+    assert valid is False and "vượt quá giới hạn" in str(error)
 
-def test_validate_oversized_message():
-    """Test rejection of oversized messages exceeding safety cap."""
-    oversized = "a" * (MAX_MESSAGE_SIZE + 100)
-    is_valid, parsed, err = validate_incoming_message(oversized)
-    assert is_valid is False
-    assert "vượt quá giới hạn" in err
-
-
-def test_validate_protocol_version_mismatch():
-    """Test rejection when protocol version is unsupported."""
-    msg = json.dumps({
+    wrong_version = json.dumps({
         "type": MSG_TYPE_HELLO,
         "protocol_version": 999,
-        "client": CLIENT_IDENTIFIER,
+        "client": NATIVE_HOST_CLIENT,
     })
-    is_valid, parsed, err = validate_incoming_message(msg)
-    assert is_valid is False
-    assert "không được hỗ trợ" in err
+    valid, _, error = validate_incoming_message(wrong_version)
+    assert valid is False and "không được hỗ trợ" in str(error)
 
 
-def test_validate_missing_type():
-    """Test rejection when 'type' field is missing or invalid."""
-    msg = json.dumps({
-        "protocol_version": PROTOCOL_VERSION,
-        "client": CLIENT_IDENTIFIER,
-    })
-    is_valid, parsed, err = validate_incoming_message(msg)
-    assert is_valid is False
-    assert "Thiếu trường 'type'" in err
+def test_reject_missing_or_unknown_message_type() -> None:
+    valid, _, error = validate_incoming_message(json.dumps({"protocol_version": PROTOCOL_VERSION}))
+    assert valid is False and "Thiếu trường 'type'" in str(error)
+
+    for message_type in (
+        "process_url",
+        "verification_required",
+        "RUN_FULL_SCAN",
+        "custom_remote_eval",
+    ):
+        valid, _, error = validate_incoming_message(_incoming(message_type))
+        assert valid is False
+        assert "không xác định" in str(error)
 
 
-def test_validate_unknown_type():
-    """Test rejection of unknown message types."""
-    msg = json.dumps({
-        "type": "custom_remote_eval",
-        "protocol_version": PROTOCOL_VERSION,
-    })
-    is_valid, parsed, err = validate_incoming_message(msg)
-    assert is_valid is False
-    assert "không xác định" in err
+def test_desktop_outbound_types_are_not_accepted_as_inbound() -> None:
+    """Message ownership is directional at the desktop validation boundary."""
+    messages = [
+        create_hello_ack_message(),
+        create_product_result_ack_message(),
+        create_open_product_message("req-1", "https://shopee.vn/item"),
+        create_cancel_processing_message("req-1"),
+        create_batch_finished_message(),
+        create_error_message("bad"),
+    ]
+    for message in messages:
+        valid, _, error = validate_incoming_message(message)
+        assert valid is False
+        assert "không xác định" in str(error)
 
 
-def test_validate_missing_product_fields():
-    """Test rejection when required fields are missing in product_result data."""
-    # Missing product_name
-    msg1 = json.dumps({
-        "type": MSG_TYPE_PRODUCT_RESULT,
-        "protocol_version": PROTOCOL_VERSION,
-        "data": {
-            "url": "https://shopee.vn/product",
-            "shop_id": "123",
-            "item_id": "456",
-            "images": [],
-        },
-    })
-    is_valid, parsed, err = validate_incoming_message(msg1)
-    assert is_valid is False
-    assert "product_name" in err
+def test_reject_missing_product_fields_and_invalid_images() -> None:
+    for field in ("product_name", "shop_id", "item_id"):
+        payload = _product_payload()
+        payload.pop(field)
+        valid, _, error = validate_incoming_message(
+            _incoming(MSG_TYPE_PRODUCT_RESULT, data=payload)
+        )
+        assert valid is False
+        assert field in str(error)
 
-    # Missing shop_id
-    msg2 = json.dumps({
-        "type": MSG_TYPE_PRODUCT_RESULT,
-        "protocol_version": PROTOCOL_VERSION,
-        "data": {
-            "url": "https://shopee.vn/product",
-            "product_name": "Tên SP",
-            "item_id": "456",
-            "images": [],
-        },
-    })
-    is_valid, parsed, err = validate_incoming_message(msg2)
-    assert is_valid is False
-    assert "shop_id" in err
+    payload = _product_payload()
+    payload["images"] = "not-a-list"
+    valid, _, error = validate_incoming_message(_incoming(MSG_TYPE_PRODUCT_RESULT, data=payload))
+    assert valid is False and "images" in str(error)
 
-    # Missing item_id
-    msg3 = json.dumps({
-        "type": MSG_TYPE_PRODUCT_RESULT,
-        "protocol_version": PROTOCOL_VERSION,
-        "data": {
-            "url": "https://shopee.vn/product",
-            "product_name": "Tên SP",
-            "shop_id": "123",
-            "images": [],
-        },
-    })
-    is_valid, parsed, err = validate_incoming_message(msg3)
-    assert is_valid is False
-    assert "item_id" in err
-
-    # Images not a list
-    msg4 = json.dumps({
-        "type": MSG_TYPE_PRODUCT_RESULT,
-        "protocol_version": PROTOCOL_VERSION,
-        "data": {
-            "url": "https://shopee.vn/product",
-            "product_name": "Tên SP",
-            "shop_id": "123",
-            "item_id": "456",
-            "images": "not_a_list",
-        },
-    })
-    is_valid, parsed, err = validate_incoming_message(msg4)
-    assert is_valid is False
-    assert "images" in err
+    payload = _product_payload()
+    payload["images"] = ["https://example.com/1.jpg", ""]
+    payload["image_count"] = 2
+    valid, _, error = validate_incoming_message(_incoming(MSG_TYPE_PRODUCT_RESULT, data=payload))
+    assert valid is False and "URL ảnh" in str(error)
 
 
-def test_validate_batch_queue_messages():
-    """Verify validation of process_url, process_progress, process_error, and cancel_processing."""
-    from shopee_image_downloader.core.bridge_protocol import (
-        MSG_TYPE_CANCEL_PROCESSING,
-        MSG_TYPE_PROCESS_ERROR,
-        MSG_TYPE_PROCESS_PROGRESS,
-        MSG_TYPE_PROCESS_URL,
-        MSG_TYPE_VERIFICATION_REQUIRED,
-        create_cancel_processing_message,
-        create_process_error_message,
-        create_process_progress_message,
-        create_process_url_message,
-        create_verification_required_message,
+def test_product_result_image_count_integrity() -> None:
+    nine_images = [f"https://img.example/{index}.jpg" for index in range(1, 10)]
+    payload = _product_payload(nine_images)
+    valid, parsed, error = validate_incoming_message(
+        _incoming(MSG_TYPE_PRODUCT_RESULT, request_id="req-9", data=payload)
     )
+    assert valid is True
+    assert error is None
+    assert parsed is not None
+    assert parse_bridge_product_data(parsed).image_count == 9
 
-    # 1. process_url
-    msg_url = create_process_url_message("req-123", "https://shopee.vn/test")
-    is_valid, parsed, err = validate_incoming_message(msg_url)
-    assert is_valid is True
-    assert parsed["type"] == MSG_TYPE_PROCESS_URL
-    assert parsed["request_id"] == "req-123"
-    assert parsed["url"] == "https://shopee.vn/test"
-
-    # 2. process_progress
-    msg_prog = create_process_progress_message("req-123", "scanning_gallery")
-    is_valid, parsed, err = validate_incoming_message(msg_prog)
-    assert is_valid is True
-    assert parsed["type"] == MSG_TYPE_PROCESS_PROGRESS
-    assert parsed["stage"] == "scanning_gallery"
-
-    # 3. process_error
-    msg_err = create_process_error_message("req-123", "https://shopee.vn/test", "TIMEOUT", "Hết thời gian")
-    is_valid, parsed, err = validate_incoming_message(msg_err)
-    assert is_valid is True
-    assert parsed["type"] == MSG_TYPE_PROCESS_ERROR
-    assert parsed["error_code"] == "TIMEOUT"
-    assert parsed["message"] == "Hết thời gian"
-
-    # 4. cancel_processing
-    msg_cancel = create_cancel_processing_message("req-123")
-    is_valid, parsed, err = validate_incoming_message(msg_cancel)
-    assert is_valid is True
-    assert parsed["type"] == MSG_TYPE_CANCEL_PROCESSING
-
-    # 5. verification_required
-    msg_ver = create_verification_required_message("req-123", "https://shopee.vn/test")
-    is_valid, parsed, err = validate_incoming_message(msg_ver)
-    assert is_valid is True
-    assert parsed["type"] == MSG_TYPE_VERIFICATION_REQUIRED
-
-
-def test_validate_product_result_image_count_integrity_success():
-    """Verify product_result with exact matching image_count passes validation and parses image_count."""
-    payload = {
-        "type": MSG_TYPE_PRODUCT_RESULT,
-        "protocol_version": PROTOCOL_VERSION,
-        "request_id": "req-authoritative-9",
-        "data": {
-            "url": "https://shopee.vn/product-i.78513158.28469164720",
-            "product_name": "Áo Thun Cotton",
-            "shop_id": "78513158",
-            "item_id": "28469164720",
-            "images": [f"https://img.com/{i}.jpg" for i in range(1, 10)],
-            "image_count": 9,
-        },
-    }
-    is_valid, parsed, err = validate_incoming_message(json.dumps(payload))
-    assert is_valid is True
-    assert err is None
-    data = parse_bridge_product_data(parsed)
-    assert len(data.images) == 9
-    assert data.image_count == 9
-
-
-def test_validate_product_result_image_count_mismatch_rejected():
-    """Verify product_result with mismatched image_count is rejected with PROTOCOL_INTEGRITY_ERROR."""
-    payload = {
-        "type": MSG_TYPE_PRODUCT_RESULT,
-        "protocol_version": PROTOCOL_VERSION,
-        "request_id": "req-mismatch",
-        "data": {
-            "url": "https://shopee.vn/product-i.78513158.28469164720",
-            "product_name": "Áo Thun Cotton",
-            "shop_id": "78513158",
-            "item_id": "28469164720",
-            "images": [f"https://img.com/{i}.jpg" for i in range(1, 5)],  # 4 images
-            "image_count": 9,  # Declared 9 images -> MISMATCH!
-        },
-    }
-    is_valid, parsed, err = validate_incoming_message(json.dumps(payload))
-    assert is_valid is False
-    assert "PROTOCOL_INTEGRITY_ERROR" in err
-
+    payload["images"] = nine_images[:4]
+    valid, _, error = validate_incoming_message(
+        _incoming(MSG_TYPE_PRODUCT_RESULT, request_id="req-mismatch", data=payload)
+    )
+    assert valid is False
+    assert "PROTOCOL_INTEGRITY_ERROR" in str(error)

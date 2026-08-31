@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 import logging
-from typing import Any
 import uuid
 
 from PySide6.QtCore import QObject, QTimer, Signal
@@ -24,7 +23,6 @@ class QueueState(str, Enum):
     IDLE = "IDLE"
     RUNNING = "RUNNING"
     PAUSED_VERIFICATION = "PAUSED_VERIFICATION"
-    CANCELLING = "CANCELLING"
     COMPLETED = "COMPLETED"
 
 
@@ -45,7 +43,6 @@ STATUS_DISPLAY_SCANNING: str = "Đang quét toàn bộ ảnh"
 STATUS_DISPLAY_SUCCESS: str = "Đã lấy dữ liệu"
 STATUS_DISPLAY_VERIFICATION: str = "Shopee yêu cầu xác minh"
 STATUS_DISPLAY_TIMEOUT: str = "Hết thời gian xử lý"
-STATUS_DISPLAY_NOT_FOUND: str = "Không tìm thấy sản phẩm"
 STATUS_DISPLAY_FAILED: str = "Không thể tải trang"
 STATUS_DISPLAY_CANCELLED: str = "Đã hủy"
 
@@ -86,7 +83,6 @@ class BatchQueueManager(QObject):
     progress_updated = Signal(int, int)  # (finished_count, total_count)
     batch_finished = Signal(int, int, list)  # (success_count, fail_count, items)
     send_open_product_requested = Signal(str, str)  # (request_id, url)
-    send_process_url_requested = Signal(str, str)  # (request_id, url)
     send_cancel_requested = Signal(str)  # (request_id)
 
     def __init__(
@@ -98,9 +94,7 @@ class BatchQueueManager(QObject):
         self.item_timeout_ms = item_timeout_ms
         self._state: QueueState = QueueState.IDLE
         self._items: list[QueueItem] = []
-        self._items_by_request_id: dict[str, QueueItem] = {}
         self._current_index: int = -1
-        self._product_identity_map: dict[str, int] = {}  # "shop_id:item_id" -> first row_idx
 
         self._timeout_timer = QTimer(self)
         self._timeout_timer.setSingleShot(True)
@@ -157,7 +151,7 @@ class BatchQueueManager(QObject):
 
         Returns False if a batch is already in progress.
         """
-        if self._state in (QueueState.RUNNING, QueueState.PAUSED_VERIFICATION, QueueState.CANCELLING):
+        if self._state in (QueueState.RUNNING, QueueState.PAUSED_VERIFICATION):
             logger.warning("Không thể bắt đầu batch mới khi batch cũ đang chạy")
             return False
 
@@ -166,8 +160,6 @@ class BatchQueueManager(QObject):
             return False
 
         self._items.clear()
-        self._items_by_request_id.clear()
-        self._product_identity_map.clear()
 
         for row_idx, url in valid_items:
             req_id = f"req-{uuid.uuid4().hex[:12]}"
@@ -178,7 +170,6 @@ class BatchQueueManager(QObject):
                 state=ItemState.PENDING,
             )
             self._items.append(item)
-            self._items_by_request_id[req_id] = item
 
         self._current_index = 0
         self._set_state(QueueState.RUNNING)
@@ -200,7 +191,6 @@ class BatchQueueManager(QObject):
         self.item_started.emit(item.row_idx, item.url, item.request_id)
         self.item_progress.emit(item.row_idx, "navigating", STATUS_DISPLAY_NAVIGATING)
         self.send_open_product_requested.emit(item.request_id, item.url)
-        self.send_process_url_requested.emit(item.request_id, item.url)
 
         if self.item_timeout_ms > 0:
             self._timeout_timer.start(self.item_timeout_ms)
@@ -263,12 +253,6 @@ class BatchQueueManager(QObject):
         item.state = ItemState.SUCCESS
         item.stage = "complete"
         item.product_data = product_data
-
-        # Track product identity (shop_id:item_id)
-        if product_data.shop_id and product_data.item_id:
-            key = product_data.product_key
-            if key not in self._product_identity_map:
-                self._product_identity_map[key] = item.row_idx
 
         logger.info(
             "[DESKTOP MODEL]\nproduct_key=%s\nstored_images=%d\ndisplayed_count=%d",
@@ -333,7 +317,7 @@ class BatchQueueManager(QObject):
 
     def cancel_batch(self) -> None:
         """Cancel ongoing batch execution and safely abandon in-flight item."""
-        if self._state not in (QueueState.RUNNING, QueueState.PAUSED_VERIFICATION, QueueState.CANCELLING):
+        if self._state not in (QueueState.RUNNING, QueueState.PAUSED_VERIFICATION):
             return
 
         logger.info("Yêu cầu hủy batch từ người dùng")

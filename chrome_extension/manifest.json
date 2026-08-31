@@ -2,10 +2,9 @@
   "manifest_version": 3,
   "name": "Shopee Product Extractor",
   "version": "1.0.0",
-  "description": "Feasibility spike extension to extract Shopee product details and gallery images from the active tab.",
+  "description": "Extract Shopee product details and relay batch or manual results to Shopee Image Downloader.",
   "permissions": [
     "activeTab",
-    "scripting",
     "nativeMessaging",
     "tabs"
   ],

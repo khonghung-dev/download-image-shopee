@@ -1,34 +1,26 @@
-# Project Context: Shopee Image Downloader
+# Project Context
 
-## Product Overview
+Shopee Image Downloader currently coordinates product extraction between a PySide6 desktop application and a Chrome extension.
 
-**Shopee Image Downloader** is a specialized Windows desktop tool tailored for e-commerce sellers, catalog managers, and researchers who need to download high-resolution product images in bulk from Shopee listings.
+## Implemented
 
-## Key Requirements & Capabilities
+- Multiline Shopee URL parsing, validation, and exact-input deduplication.
+- Persistent output-folder selection and validation.
+- Sequential, resilient batch orchestration with one request in flight.
+- Verification pause/resume, timeout handling, cancellation, and per-item failure continuation.
+- Chrome worker-tab orchestration through Native Messaging.
+- Product name, shop/item identity, and gallery URL extraction through `chrome_extension/extractor_core.js`.
+- Manual extension extraction and manual send to the desktop.
+- Desktop result-table correlation and product-key deduplication.
 
-1. **Multi-link Batch Input**:
-   - Accepts a list of Shopee product URLs provided by the user (one link per line).
-   - Supports different Shopee URL formats (e.g., standard web URLs, shortlinks, mobile sharing URLs).
+## Not implemented
 
-2. **Destination Folder Selection**:
-   - Allows the user to select a root download directory via a native Windows directory picker dialog.
-   - Persists user preferences (e.g., last used directory) where appropriate.
+- Downloading image bytes.
+- Creating per-product output folders.
+- Atomic image-file writes, naming, or retry policy.
 
-3. **Metadata & Image Extraction**:
-   - Parses Shopee links to identify item ID, shop ID, and product name.
-   - Extracts all associated media: main cover photos, gallery images, variation/tier model photos, and description images.
-   - Selects the highest available image resolution.
+The selected output folder is therefore a validated, persisted prerequisite for the planned download stage; current processing stops after receiving extraction results.
 
-4. **Organized Output Structure**:
-   - Creates a dedicated subfolder for each product inside the selected root directory.
-   - Subfolder naming follows a clean, Windows-safe convention (e.g., `<item_id>_<sanitized_product_name>`).
-   - Image files are saved with sequential numbering and proper extensions (`01_cover.jpg`, `02_gallery_1.jpg`, etc.).
+## Frozen known regression
 
-5. **Fault Tolerance & Error Recovery**:
-   - If an individual product link is invalid, geo-blocked, deleted, or encounters a network error, the application records a clear failure status for that item and immediately continues processing the rest of the queue.
-   - Produces a summary report (e.g., X succeeded, Y failed) upon batch completion.
-
-6. **Responsive User Interface**:
-   - The desktop GUI remains completely interactive at all times.
-   - Real-time progress indicators (item progress, overall queue progress, log viewer) update smoothly via Qt signals.
-   - Supports cancellation / pausing if requested by the user.
+The automatic flow returns four images for the known regression case while manual extension extraction can return nine. Architecture cleanup deliberately preserves that behavior for a separate debugging task.

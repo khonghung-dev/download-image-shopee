@@ -21,15 +21,11 @@ MSG_TYPE_HELLO_ACK: str = "hello_ack"
 MSG_TYPE_PRODUCT_RESULT: str = "product_result"
 MSG_TYPE_PRODUCT_RESULT_ACK: str = "product_result_ack"
 MSG_TYPE_OPEN_PRODUCT: str = "open_product"
-MSG_TYPE_PROCESS_URL: str = "process_url"
 MSG_TYPE_PROCESS_PROGRESS: str = "process_progress"
 MSG_TYPE_PROCESS_ERROR: str = "process_error"
 MSG_TYPE_CANCEL_PROCESSING: str = "cancel_processing"
-MSG_TYPE_VERIFICATION_REQUIRED: str = "verification_required"
 MSG_TYPE_BATCH_FINISHED: str = "batch_finished"
 MSG_TYPE_ERROR: str = "error"
-
-CLIENT_IDENTIFIER: str = "shopee_chrome_extension"
 
 
 @dataclass(frozen=True)
@@ -50,15 +46,6 @@ class BridgeProductData:
     def product_key(self) -> str:
         """Return canonical deduplication key for this product listing."""
         return f"{self.shop_id}:{self.item_id}"
-
-
-def create_hello_message(protocol_version: int = PROTOCOL_VERSION) -> str:
-    """Create a hello handshake message."""
-    return json.dumps({
-        "type": MSG_TYPE_HELLO,
-        "protocol_version": protocol_version,
-        "client": CLIENT_IDENTIFIER,
-    })
 
 
 def create_hello_ack_message(protocol_version: int = PROTOCOL_VERSION) -> str:
@@ -97,52 +84,6 @@ def create_open_product_message(
     })
 
 
-def create_process_url_message(
-    request_id: str,
-    url: str,
-    protocol_version: int = PROTOCOL_VERSION,
-) -> str:
-    """Create a process_url command message for the Chrome Extension (backward compatibility)."""
-    return json.dumps({
-        "type": MSG_TYPE_PROCESS_URL,
-        "protocol_version": protocol_version,
-        "request_id": request_id,
-        "url": url,
-    })
-
-
-def create_process_progress_message(
-    request_id: str,
-    stage: str,
-    protocol_version: int = PROTOCOL_VERSION,
-) -> str:
-    """Create a process_progress notification message."""
-    return json.dumps({
-        "type": MSG_TYPE_PROCESS_PROGRESS,
-        "protocol_version": protocol_version,
-        "request_id": request_id,
-        "stage": stage,
-    })
-
-
-def create_process_error_message(
-    request_id: str,
-    url: str = "",
-    error_code: str = "ERROR",
-    message: str = "",
-    protocol_version: int = PROTOCOL_VERSION,
-) -> str:
-    """Create a process_error notification message."""
-    return json.dumps({
-        "type": MSG_TYPE_PROCESS_ERROR,
-        "protocol_version": protocol_version,
-        "request_id": request_id,
-        "url": url,
-        "error_code": error_code,
-        "message": message,
-    })
-
-
 def create_cancel_processing_message(
     request_id: str | None = None,
     protocol_version: int = PROTOCOL_VERSION,
@@ -155,22 +96,6 @@ def create_cancel_processing_message(
     if request_id is not None:
         payload["request_id"] = request_id
     return json.dumps(payload)
-
-
-def create_verification_required_message(
-    request_id: str,
-    url: str = "",
-    message: str = "Shopee yêu cầu xác minh trên Chrome.",
-    protocol_version: int = PROTOCOL_VERSION,
-) -> str:
-    """Create a verification_required notification message."""
-    return json.dumps({
-        "type": MSG_TYPE_VERIFICATION_REQUIRED,
-        "protocol_version": protocol_version,
-        "request_id": request_id,
-        "url": url,
-        "message": message,
-    })
 
 
 def create_batch_finished_message(
@@ -200,7 +125,7 @@ def create_error_message(
 
 
 def validate_incoming_message(
-    raw_message: str | bytes,
+    raw_message: str | bytes | None,
 ) -> tuple[bool, dict[str, Any] | None, str | None]:
     """Validate raw incoming WebSocket message string or bytes against schema.
 
@@ -246,18 +171,6 @@ def validate_incoming_message(
             return False, None, "Trường 'client' không hợp lệ trong handshake hello"
         return True, data, None
 
-    if msg_type == MSG_TYPE_HELLO_ACK:
-        return True, data, None
-
-    if msg_type in (MSG_TYPE_OPEN_PRODUCT, MSG_TYPE_PROCESS_URL):
-        req_id = data.get("request_id")
-        url = data.get("url")
-        if not isinstance(req_id, str) or not req_id.strip():
-            return False, None, f"Trường 'request_id' không hợp lệ hoặc bị thiếu trong {msg_type}"
-        if not isinstance(url, str) or not url.strip():
-            return False, None, f"Trường 'url' không hợp lệ hoặc bị thiếu trong {msg_type}"
-        return True, data, None
-
     if msg_type == MSG_TYPE_PROCESS_PROGRESS:
         req_id = data.get("request_id")
         stage = data.get("stage")
@@ -274,15 +187,6 @@ def validate_incoming_message(
             return False, None, "Trường 'request_id' không hợp lệ hoặc bị thiếu trong process_error"
         if not isinstance(msg, str):
             return False, None, "Trường 'message' không hợp lệ hoặc bị thiếu trong process_error"
-        return True, data, None
-
-    if msg_type in (MSG_TYPE_CANCEL_PROCESSING, MSG_TYPE_BATCH_FINISHED):
-        return True, data, None
-
-    if msg_type == MSG_TYPE_VERIFICATION_REQUIRED:
-        req_id = data.get("request_id")
-        if not isinstance(req_id, str) or not req_id.strip():
-            return False, None, "Trường 'request_id' không hợp lệ hoặc bị thiếu trong verification_required"
         return True, data, None
 
     if msg_type == MSG_TYPE_PRODUCT_RESULT:
@@ -318,9 +222,6 @@ def validate_incoming_message(
             if not isinstance(declared_count, int) or declared_count != len(images):
                 return False, None, f"PROTOCOL_INTEGRITY_ERROR: image_count ({declared_count}) != len(images) ({len(images)})"
 
-        return True, data, None
-
-    if msg_type in (MSG_TYPE_PRODUCT_RESULT_ACK, MSG_TYPE_ERROR):
         return True, data, None
 
     return False, None, f"Loại tin nhắn không xác định: '{msg_type}'"

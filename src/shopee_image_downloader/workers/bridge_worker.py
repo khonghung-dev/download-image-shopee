@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Set
+from typing import Any
 
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtNetwork import QHostAddress
@@ -13,14 +13,10 @@ from PySide6.QtWebSockets import QWebSocket, QWebSocketServer
 from shopee_image_downloader.core.bridge_protocol import (
     DEFAULT_BRIDGE_HOST,
     DEFAULT_BRIDGE_PORT,
-    MSG_TYPE_CANCEL_PROCESSING,
     MSG_TYPE_HELLO,
     MSG_TYPE_PROCESS_ERROR,
     MSG_TYPE_PROCESS_PROGRESS,
-    MSG_TYPE_PROCESS_URL,
     MSG_TYPE_PRODUCT_RESULT,
-    MSG_TYPE_VERIFICATION_REQUIRED,
-    BridgeProductData,
     create_error_message,
     create_hello_ack_message,
     create_product_result_ack_message,
@@ -41,10 +37,7 @@ class ExtensionBridgeServer(QObject):
     product_received = Signal(object)  # Emits BridgeProductData
     process_progress_received = Signal(str, str)  # Emits (request_id, stage)
     process_error_received = Signal(str, str, str, str)  # Emits (request_id, url, error_code, message)
-    verification_required_received = Signal(str, str, str)  # Emits (request_id, url, message)
     error_occurred = Signal(str)
-    client_connected = Signal(str)
-    client_disconnected = Signal(str)
 
     def __init__(
         self,
@@ -146,15 +139,12 @@ class ExtensionBridgeServer(QObject):
             lambda s=client_socket: self._on_client_disconnected(s)
         )
 
-        self.client_connected.emit(peer_address)
-
     def _on_client_disconnected(self, socket: QWebSocket) -> None:
         """Handle client disconnection."""
         if socket in self._clients:
             self._clients.remove(socket)
             peer_address = socket.peerAddress().toString()
             logger.info(f"Client ngắt kết nối: {peer_address}")
-            self.client_disconnected.emit(peer_address)
 
         if not self._clients:
             self.connection_status_changed.emit(False)
@@ -215,14 +205,6 @@ class ExtensionBridgeServer(QObject):
             msg = str(parsed_data.get("message", "")).strip()
             logger.info(f"Nhận process_error: req={req_id}, code={error_code}, msg={msg}")
             self.process_error_received.emit(req_id, url, error_code, msg)
-            return
-
-        if msg_type == MSG_TYPE_VERIFICATION_REQUIRED:
-            req_id = str(parsed_data.get("request_id", "")).strip()
-            url = str(parsed_data.get("url", "")).strip()
-            msg = str(parsed_data.get("message", "Shopee yêu cầu xác minh trên Chrome.")).strip()
-            logger.info(f"Nhận verification_required: req={req_id}")
-            self.verification_required_received.emit(req_id, url, msg)
             return
 
         if msg_type == MSG_TYPE_PRODUCT_RESULT:

@@ -1,77 +1,54 @@
-# Testing Strategy: Shopee Image Downloader
+# Testing
 
-This document outlines the testing guidelines, test categories, and verification commands for the project.
+The suite is offline and protects the current architecture rather than deleted implementation generations.
 
-## Test Categories
+## Test modules
 
-1. **Unit Tests (`tests/`)**:
-   - Validate standalone business logic, URL parsers, metadata extractors, path sanitization, filesystem safety guards, and session data structures.
-   - Run completely offline without real HTTP requests or GUI windows.
+| Module | Coverage |
+|---|---|
+| `test_app.py` | QApplication and desktop bootstrap |
+| `test_url_validator.py` | Multiline parsing, accepted Shopee domains, invalid input, exact deduplication |
+| `test_settings.py` | Output-folder persistence and restoration |
+| `test_batch_queue.py` | FIFO order, one in-flight request, correlation, failure continuation, timeout, verification, cancellation |
+| `test_bridge_protocol.py` | Directional active protocol, validation, size/version checks, product integrity |
+| `test_bridge_server.py` | Loopback Qt WebSocket handshake, product receipt, disconnect/reconnect |
+| `test_native_messaging.py` | Four-byte framing, host manifest, offline/online relay, payload preservation |
+| `test_extension_extractor.py` | Real JavaScript extractor behavior, service-worker state, worker tab, canonical sender, architecture boundaries |
+| `test_ui.py` | Current widgets, start guard, queue/bridge integration, single row updates, manual deduplication |
 
-2. **Authentication & Session Tests (`tests/test_auth_session.py`)**:
-   - Validate installed Google Chrome selection (`channel="chrome"` and path discovery).
-   - Validate dedicated application-owned profile directory (`%LOCALAPPDATA%\ShopeeImageDownloader\ChromeUserData`).
-   - Validate path safety guards rejecting personal Chrome User Data, Profile 10, and system roots.
-   - Validate authentication cookie extraction, startup session verification, grace periods, verification challenges, timeout handling, and safe logout.
+Deleted Playwright authentication, Python metadata-extractor, URL-resolver, and workaround-protocol tests are not part of the active suite.
 
-3. **Batch Queue & Orchestration Tests (`tests/test_batch_queue.py`)**:
-   - Validate FIFO sequential item execution (exactly 1 URL in flight).
-   - Validate individual failure resilience (URL failure does not halt the queue).
-   - Validate input URL deduplication and product identity resolution (`shop_id:item_id`).
-   - Validate `request_id` correlation and stale result rejection.
-   - Validate per-item bounded timeouts and automatic progression.
-   - Validate human verification pause (`PAUSED_VERIFICATION`) and resume (`Tiếp tục`) continuing the same item.
-   - Validate batch cancellation (`Hủy`) and clean state reset.
+## Run all tests
 
-4. **Extension & Bridge Tests (`tests/test_bridge_protocol.py`, `tests/test_bridge_server.py`, `tests/test_extension_extractor.py`, `tests/test_native_messaging.py`)**:
-   - Validate versioned JSON protocol schemas, message size limits, handshake (`hello` -> `hello_ack`), batch messages (`open_product`, `process_url`, `process_progress`, `process_error`, `cancel_processing`), and product payloads.
-   - Validate `image_count` protocol field integrity validation and `PROTOCOL_INTEGRITY_ERROR` rejection upon mismatch.
-   - Validate Chrome Native Messaging 4-byte framing, binary mode stdio, partial stream reads, malformed JSON recovery, and oversize rejection.
-   - Validate Native Host bidirectional lossless relay (testing 9 images and 30-image large gallery payloads without truncation), offline graceful handling (`desktop_connected: false`), and desktop online connection.
-   - Validate single canonical product result builder in background (`sendCompleteProductToDesktop`) and zero active DOM querying in background service worker.
-   - Validate event-driven `AUTHORITATIVE_PRODUCT_COMPLETE` emission from content script when gallery hydrations achieve `COMPLETE`.
-   - Validate auto-send exactly-once guard in `background.js` request state machine.
-   - Validate test cases A, B, C, D, E ensuring complete gallery extraction (9 images, 25 images), manual and batch sender convergence, stale event rejection, and bounded `PRODUCT_TIMEOUT` error emission.
-   - Validate `structured_data` (JSON-LD) and `structured_single_fallback` semantics as strictly `PARTIAL` across 1, 4, and 20 candidate counts.
-   - Execute the real production core against a mutable canonical gallery: early `A B C D` with no arrows must remain `PARTIAL`, keep both boundaries `UNKNOWN`, and never enter authoritative cache; later hydration and real overlapping carousel clicks must return 9 images with `CAROUSEL_BOUNDS_CONFIRMED`.
-   - Validate a genuine four-image/no-arrow gallery remains initially `PARTIAL`, then becomes `COMPLETE` only after the 1000 ms production quiet-window proof (`STABLE_SINGLE_PAGE`).
-   - Validate the existing overlapping 9-image plus 1-video carousel still enumerates all images, excludes video, and reports `CAROUSEL_BOUNDS_CONFIRMED`.
-   - Validate content script automatic lifecycle runs on load/DOM-idle, and safely disconnects observers on completion or navigation.
-
-5. **UI & Window Initialization Tests (`tests/test_ui.py`)**:
-   - Verify that Qt widgets, window title, Shopee Account section, Bridge status indicator, URL inputs, table rows, and signal bindings initialize without uncaught exceptions.
-   - Validate batch button state transitions (`Bắt đầu tải ảnh` -> `Hủy` -> `Tiếp tục` -> `Bắt đầu tải ảnh`).
-   - Validate bridge connection guard, table row insertion, updating, and deduplication when receiving batch progress and product results.
-   - Validate Case D: existing batch row (`request_id=R1`, `product_key=P1`) updated in place when subsequent manual send (`request_id=None`, `product_key=P1`) arrives, with zero duplicate rows.
-   - Run in offscreen mode (`QT_QPA_PLATFORM=offscreen`) so they execute seamlessly in headless environments and CI/CD pipelines.
-
-5. **Integration / Mock Network Tests**:
-   - Test downloader and worker pipelines using mock HTTP responses and sample Shopee HTML/JSON payloads.
-
-## Running Tests
-
-### Standard Test Execution
+With an installed development environment:
 
 ```powershell
-uv run pytest
+pytest -ra
 ```
 
-### Run with Verbose Output
+With uv:
 
 ```powershell
-uv run pytest -v
+uv run --extra dev pytest -ra
 ```
 
-### Headless / Offscreen Execution (for CI or automated runs)
+Run Qt tests headlessly when needed:
 
 ```powershell
-$env:QT_QPA_PLATFORM="offscreen"; uv run pytest -v
+$env:QT_QPA_PLATFORM='offscreen'
+pytest -ra
 ```
 
+JavaScript syntax checks require Node.js and are invoked by `test_extension_extractor.py`. Tests must not use live Shopee pages, personal Chrome profile data, cookies, passwords, the Windows registry, or user output images.
 
-## Guidelines for Writing Tests
+## Required architecture regressions
 
-- Never make live network calls inside unit tests.
-- Isolate file system tests using `tmp_path` pytest fixture.
-- NEVER point tests to personal Chrome User Data or Profile 10.
-- Keep tests fast, independent, and idempotent.
+- Exactly one `product_result` construction in `background.js`.
+- No `new WebSocket` or `ws://127.0.0.1:8765` in extension JavaScript.
+- No `process_url`, `RUN_FULL_SCAN`, or `PING_SCANNER` compatibility path.
+- No popup `executeScript` extraction or popup-authored product payload.
+- No DOM extraction in `background.js`.
+- The Native Host/Desktop localhost WebSocket remains operational.
+- A four-image automatic result is passed through unchanged; the cleanup must not synthesize the missing images.
+
+Do not weaken extraction tests to make a failing implementation appear green. Record pre-existing failures separately from cleanup-introduced failures.

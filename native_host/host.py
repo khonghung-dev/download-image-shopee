@@ -22,6 +22,7 @@ MAX_MESSAGE_SIZE = 5 * 1024 * 1024  # 5 MB
 DESKTOP_HOST = "127.0.0.1"
 DESKTOP_PORT = 8765
 
+
 # Configure Logging (File only, never stdout)
 def setup_logging() -> None:
     """Configure non-sensitive file logging in LocalAppData."""
@@ -134,6 +135,8 @@ class NativeMessagingHost:
         logger.info("Received WebSocket frame from Desktop: %s", text[:120])
         try:
             parsed = json.loads(text)
+            if parsed.get("type") == "hello_ack":
+                return
             self.send_native_message(parsed)
         except Exception as err:
             logger.error("Failed to parse Desktop WebSocket payload: %s", err)
@@ -144,7 +147,7 @@ class NativeMessagingHost:
         self.send_native_message({
             "protocol_version": PROTOCOL_VERSION,
             "type": "bridge_status",
-            "desktop_connected": false if False else False,
+            "desktop_connected": False,
             "message": "Mất kết nối với Desktop. Hãy mở ứng dụng rồi nhấn \"Kết nối lại\".",
         })
 
@@ -173,7 +176,7 @@ class NativeMessagingHost:
         msg_type = message.get("type", "")
         logger.info("Processing message from Chrome Extension: %s", msg_type)
 
-        if msg_type in ("get_status", "hello", "connect_desktop", "ping"):
+        if msg_type == "connect_desktop":
             connected = self.ensure_desktop_connection()
             if connected:
                 self.send_native_message({
@@ -191,55 +194,31 @@ class NativeMessagingHost:
                 })
             return
 
-        if msg_type == "disconnect_desktop":
-            self.ws_client.close()
-            self.send_native_message({
-                "protocol_version": PROTOCOL_VERSION,
-                "type": "bridge_status",
-                "desktop_connected": False,
-                "message": "Đã ngắt kết nối.",
-            })
-            return
-
-        if msg_type == "product_result":
-            data_obj = message.get("data", {})
-            req_id = message.get("request_id", "")
-            prod_key = f"{data_obj.get('shop_id', '')}:{data_obj.get('item_id', '')}"
-            images = data_obj.get("images", [])
-            img_count = len(images) if isinstance(images, list) else 0
-
-            logger.info("[NATIVE IN]\nrequest_id=%s\nproduct_key=%s\nimages=%d", req_id, prod_key, img_count)
-
-            if not self.ensure_desktop_connection():
-                self.send_native_message({
-                    "protocol_version": PROTOCOL_VERSION,
-                    "type": "product_result_ack",
-                    "success": False,
-                    "error": "Shopee Image Downloader chưa được mở (127.0.0.1:8765).",
-                })
-                return
-
-            logger.info("[NATIVE OUT]\nrequest_id=%s\nproduct_key=%s\nimages=%d", req_id, prod_key, img_count)
-            # Forward to desktop
+        # The host is a transport relay. Message validation and business state
+        # remain with the extension and desktop application.
+        if self.ensure_desktop_connection():
             sent = self.ws_client.send_text(json.dumps(message, ensure_ascii=False))
-            if not sent:
+            if not sent and msg_type == "product_result":
                 self.send_native_message({
                     "protocol_version": PROTOCOL_VERSION,
                     "type": "product_result_ack",
                     "success": False,
                     "error": "Không thể gửi dữ liệu tới Desktop.",
                 })
-            return
-
-        # Generic relay for future bidirectional extensions
-        if self.ensure_desktop_connection():
-            self.ws_client.send_text(json.dumps(message, ensure_ascii=False))
         else:
-            self.send_native_message({
-                "protocol_version": PROTOCOL_VERSION,
-                "type": "error",
-                "error": f"Desktop chưa kết nối để nhận lệnh '{msg_type}'.",
-            })
+            if msg_type == "product_result":
+                self.send_native_message({
+                    "protocol_version": PROTOCOL_VERSION,
+                    "type": "product_result_ack",
+                    "success": False,
+                    "error": "Shopee Image Downloader chưa được mở (127.0.0.1:8765).",
+                })
+            else:
+                self.send_native_message({
+                    "protocol_version": PROTOCOL_VERSION,
+                    "type": "error",
+                    "error": f"Desktop chưa kết nối để nhận lệnh '{msg_type}'.",
+                })
 
     def run(self) -> None:
         """Main execution loop reading native frames until stdin EOF."""

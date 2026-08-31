@@ -308,37 +308,17 @@
     }
 
     try {
-      chrome.tabs.sendMessage(activeTabId, { action: 'EXTRACT_PRODUCT_DATA', forceRescan }, async (response) => {
+      chrome.tabs.sendMessage(activeTabId, {
+        action: 'EXTRACT_PRODUCT_DATA',
+        forceRescan: true,
+        fullEnumeration: true,
+        trigger: forceRescan ? 'manual_rescan' : 'manual_popup'
+      }, (response) => {
         if (!chrome.runtime.lastError && response && response.success && response.data) {
           renderProductData(response.data, activeTabUrl);
         } else {
-          // Fallback: Inject extractor script directly via chrome.scripting API if content script wasn't active
-          try {
-            if (chrome.scripting) {
-              const injectionResults = await chrome.scripting.executeScript({
-                target: { tabId: activeTabId },
-                func: async (rescanFlag) => {
-                  if (typeof ShopeeExtractorCore !== 'undefined') {
-                    return await ShopeeExtractorCore.extractProductData(document, window.location.href, { forceRescan: rescanFlag });
-                  }
-                  return null;
-                },
-                args: [forceRescan]
-              });
-
-              if (injectionResults && injectionResults[0] && injectionResults[0].result) {
-                renderProductData(injectionResults[0].result, activeTabUrl);
-                return;
-              }
-            }
-
-            errorMessage.textContent = 'Vui lòng tải lại trang sản phẩm Shopee và thử lại.';
-            showView('error');
-          } catch (injectErr) {
-            console.error('Fallback injection failed:', injectErr);
-            errorMessage.textContent = 'Không thể kết nối với tab Shopee hiện tại.';
-            showView('error');
-          }
+          errorMessage.textContent = 'Vui lòng tải lại trang sản phẩm Shopee và thử lại.';
+          showView('error');
         }
       });
     } catch (err) {
@@ -371,15 +351,7 @@
       chrome.runtime.sendMessage({
         action: 'SEND_PRODUCT_TO_DESKTOP',
         tabId: activeTabId,
-        url: activeTabUrl,
-        payload: {
-          url: currentExtractedData.url,
-          product_name: currentExtractedData.product_name,
-          shop_id: currentExtractedData.shop_id,
-          item_id: currentExtractedData.item_id,
-          images: currentExtractedData.images,
-          image_count: currentExtractedData.images.length
-        }
+        url: activeTabUrl
       }, (response) => {
         if (!chrome.runtime.lastError && response && response.success) {
           btnSendDesktop.classList.add('sent');
@@ -394,7 +366,7 @@
           }, 2000);
         } else {
           const errText = (response && response.error) || 'Không thể gửi đến ứng dụng Desktop.';
-          alert(errText + '\nVui lòng kiểm tra ứng dụng Desktop (127.0.0.1:8765) đang chạy.');
+          alert(errText + '\nVui lòng kiểm tra Shopee Image Downloader đang chạy.');
           btnSendText.textContent = originalText;
           btnSendIcon.textContent = originalIcon;
           updateSendButtonState();
@@ -493,4 +465,3 @@
 
   document.addEventListener('DOMContentLoaded', init);
 })();
-

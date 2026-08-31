@@ -41,6 +41,8 @@ htmlcov/
 .coverage
 .coverage.*
 .cache
+.uv-cache/
+.test-venv/
 nosetests.xml
 coverage.xml
 *.cover
@@ -57,6 +59,12 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+
+# Runtime diagnostics and scratch captures
+*.log
+*.tmp
+*.trace
+diagnostic-captures/
 
 # PySide / Qt
 *.qm

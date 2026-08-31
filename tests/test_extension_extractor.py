@@ -1,9 +1,4 @@
-"""
-Tests for Chrome Extension Manifest V3 Spike (Task 006X).
-Validates manifest structure, permissions, JS syntax, confirmed Shopee DOM structure,
-button-driven carousel pagination, rewind-to-left normalization, media classification (IMAGE vs VIDEO),
-and transactional rescan state management.
-"""
+"""Regression tests for the active Chrome extension and canonical extractor."""
 
 import json
 from pathlib import Path
@@ -57,7 +52,7 @@ def test_manifest_structure_and_mv3_compliance():
     # Permission checks (Must be minimal)
     permissions = manifest.get("permissions", [])
     assert "activeTab" in permissions
-    assert "scripting" in permissions
+    assert "scripting" not in permissions
 
     # Strictly forbidden permissions
     forbidden = ["<all_urls>", "debugger", "cookies", "history", "management"]
@@ -257,6 +252,28 @@ def test_background_js_runtime_state_machine():
           return new MockNativePort(name);
         }},
         lastError: null
+      }},
+      tabs: {{
+        query: async () => [{{
+          id: 77,
+          url: 'https://shopee.vn/test-product-i.123.456'
+        }}],
+        sendMessage: async (tabId, request) => {{
+          if (tabId !== 77 || request.type !== 'GET_COMPLETE_SNAPSHOT') return null;
+          return {{
+            ok: true,
+            snapshot: {{
+              scan_state: 'COMPLETE',
+              product_key: '123:456',
+              final_url: 'https://shopee.vn/test-product-i.123.456',
+              product_name: 'Test Product',
+              shop_id: '123',
+              item_id: '456',
+              images: ['https://example.com/1.jpg'],
+              image_count: 1
+            }}
+          }};
+        }}
       }}
     }};
 
@@ -317,13 +334,8 @@ def test_background_js_runtime_state_machine():
       let sendProductSuccess = null;
       messageListener({{
         action: 'SEND_PRODUCT_TO_DESKTOP',
-        payload: {{
-          url: 'https://shopee.vn/test-product-i.123.456',
-          product_name: 'Test Product',
-          shop_id: '123',
-          item_id: '456',
-          images: ['https://example.com/1.jpg']
-        }}
+        tabId: 77,
+        url: 'https://shopee.vn/test-product-i.123.456'
       }}, {{}}, (resp) => {{
         sendProductSuccess = resp;
       }});
@@ -812,7 +824,7 @@ def test_background_js_syntax_and_structure():
     assert "restoreOriginalUserTab" in content
     assert "parseExpectedProduct" in content
     assert "open_product" in content
-    assert "process_url" in content
+    assert "process_url" not in content
     assert "cancel_processing" in content
     assert "batch_finished" in content
     assert "process_error" in content
@@ -1684,7 +1696,7 @@ def test_static_architecture_single_product_result_builder():
     bg_path = EXTENSION_DIR / "background.js"
     content = bg_path.read_text(encoding="utf-8")
 
-    # Check for type: 'product_result' occurrences (should only be in sendProductSnapshotToDesktop)
+    # The single builder is sendCompleteProductToDesktop().
     product_result_matches = re.findall(r"type:\s*['\"]product_result['\"]", content)
     assert len(product_result_matches) == 1, (
         f"Expected exactly 1 product_result construction, found {len(product_result_matches)}"
@@ -1694,6 +1706,22 @@ def test_static_architecture_single_product_result_builder():
     assert "document.querySelectorAll" not in content
     assert "document.querySelector" not in content
     assert "executeScript" not in content  # Background must NOT use executeScript for batch extraction
+
+
+def test_extension_layers_have_single_extraction_and_transport_owners():
+    """Prevent legacy RPC aliases, popup extraction, and direct extension WebSockets."""
+    background = (EXTENSION_DIR / "background.js").read_text(encoding="utf-8")
+    content = (EXTENSION_DIR / "content.js").read_text(encoding="utf-8")
+    popup = (EXTENSION_DIR / "popup.js").read_text(encoding="utf-8")
+
+    assert "new WebSocket" not in background + content + popup
+    assert "ws://127.0.0.1:8765" not in background + content + popup
+    assert "RUN_FULL_SCAN" not in content
+    assert "PING_SCANNER" not in content
+    assert "executeScript" not in popup
+    assert "request.payload" not in background
+    assert "ShopeeExtractorCore" not in background
+    assert "extractProductData" not in popup
 
 
 def test_source_selection_structured_data_always_partial():
@@ -2178,3 +2206,431 @@ eval({json.dumps(content_code)});
 
     # No complete message emitted when only structured 4 images
     assert len(data["sentMessages"]) == 0
+
+
+_REAL_DOM_DELAYED_CAROUSEL_HARNESS_JS = r"""
+function createRealDomDelayedCarouselHarness(transitionDelayMs = 140) {
+  const frames = [
+    [{ type: 'video', id: 'V1' }, 'I1', 'I2', 'I3', 'I4'],
+    ['I3', 'I4', 'I5', 'I6', 'I7'],
+    ['I5', 'I6', 'I7', 'I8', 'I9']
+  ];
+  let position = 0;
+  let transitionPending = false;
+  let rightClicks = 0;
+
+  function makeImageElement(assetId, isVideo = false) {
+    const original = `https://down-vn.img.susercontent.com/file/${assetId}`;
+    return {
+      tagName: 'IMG',
+      className: isVideo ? 'emXGWZ' : 'P39yUt',
+      src: original,
+      currentSrc: `${original}@resize_w82_nl.webp`,
+      getAttribute(name) {
+        if (name === 'alt') return isVideo ? 'icon video play' : `product ${assetId}`;
+        if (name === 'class') return this.className;
+        if (name === 'src') return original;
+        if (name === 'srcset') {
+          return `${original}@resize_w82_nl.webp 1x, ${original}@resize_w164_nl.webp 2x`;
+        }
+        return null;
+      }
+    };
+  }
+
+  function makeMedia(spec) {
+    const isVideo = typeof spec === 'object' && spec.type === 'video';
+    const id = isVideo ? spec.id : spec;
+    const image = makeImageElement(`vn-real-${id}`, isVideo);
+    return {
+      tagName: 'DIV',
+      className: 'qIctnQ',
+      textContent: '',
+      getAttribute: name => name === 'class' ? 'qIctnQ' : null,
+      querySelector(selector) {
+        if (isVideo && (
+          selector.includes('video play') || selector.includes('play') ||
+          selector.includes('emXGWZ') || selector.includes('[class*="video"]')
+        )) return image;
+        if (!isVideo && (
+          selector.includes('video play') || selector.includes('play') ||
+          selector.includes('emXGWZ') || selector.includes('[class*="video"]') ||
+          selector.includes('video')
+        )) return null;
+        if (selector.includes('img') || selector.includes('picture')) return image;
+        return null;
+      }
+    };
+  }
+
+  const leftButton = {
+    tagName: 'BUTTON',
+    className: 'shopee-icon-button UTST3I',
+    get disabled() { return position === 0 || transitionPending; },
+    getAttribute(name) {
+      if (name === 'aria-disabled') return this.disabled ? 'true' : 'false';
+      if (name === 'style') return '';
+      return null;
+    },
+    click() {
+      if (this.disabled) return;
+      transitionPending = true;
+      setTimeout(() => {
+        position--;
+        transitionPending = false;
+      }, transitionDelayMs);
+    }
+  };
+  const rightButton = {
+    tagName: 'BUTTON',
+    className: 'shopee-icon-button mARMpd',
+    get disabled() { return position === frames.length - 1; },
+    getAttribute(name) {
+      if (name === 'aria-disabled') return this.disabled ? 'true' : 'false';
+      if (name === 'style') return '';
+      return null;
+    },
+    click() {
+      rightClicks++;
+      if (this.disabled || transitionPending) return;
+      transitionPending = true;
+      setTimeout(() => {
+        position++;
+        transitionPending = false;
+      }, transitionDelayMs);
+    }
+  };
+  const leftArrow = makeImageElement('icon-left');
+  leftArrow.getAttribute = name => name === 'alt' ? 'icon arrow left bold' : null;
+  leftArrow.closest = selector => selector === 'button' ? leftButton : null;
+  const rightArrow = makeImageElement('icon-right');
+  rightArrow.getAttribute = name => name === 'alt' ? 'icon arrow right bold' : null;
+  rightArrow.closest = selector => selector === 'button' ? rightButton : null;
+
+  const gallery = {
+    tagName: 'DIV',
+    className: 'Wi_1Rq',
+    parentElement: null,
+    get childCount() { return this.children.length; },
+    get children() {
+      return [...frames[position].map(makeMedia), leftButton, rightButton];
+    },
+    getAttribute: name => name === 'class' ? 'Wi_1Rq' : null,
+    querySelectorAll(selector) {
+      if (selector.includes('qIctnQ') || selector.includes('image-carousel__item')) {
+        return frames[position].map(makeMedia);
+      }
+      if (selector.includes('button.shopee-icon-button')) return [leftButton, rightButton];
+      return [];
+    },
+    querySelector(selector) {
+      if (selector.includes('arrow left')) return leftArrow;
+      if (selector.includes('arrow right')) return rightArrow;
+      if (selector.includes('UTST3I')) return leftButton;
+      if (selector.includes('mARMpd')) return rightButton;
+      return null;
+    }
+  };
+
+  const briefing = {
+    querySelector(selector) {
+      if (selector.includes('Wi_1Rq') || selector.includes('image-carousel')) return gallery;
+      if (selector.includes('qIctnQ')) return frames[position].map(makeMedia)[0];
+      return null;
+    }
+  };
+  const doc = {
+    body: {},
+    documentElement: {},
+    title: 'Shopee',
+    visibilityState: 'visible',
+    readyState: 'loading',
+    querySelectorAll: () => [],
+    querySelector(selector) {
+      if (selector.includes('product-briefing')) return briefing;
+      if (selector.includes('Wi_1Rq')) return gallery;
+      if (selector.includes('qIctnQ')) return frames[position].map(makeMedia)[0];
+      if (selector === 'h1' || selector.includes(' h1')) {
+        return { textContent: 'Sản phẩm kiểm thử carousel' };
+      }
+      return null;
+    }
+  };
+
+  return {
+    doc,
+    gallery,
+    get rightClicks() { return rightClicks; },
+    get position() { return position; }
+  };
+}
+"""
+
+
+def test_real_dom_visible_four_must_advance_right_and_enumerate_nine():
+    """The real five-media window (one video) must not be promoted as four COMPLETE images."""
+    core_path = EXTENSION_DIR / "extractor_core.js"
+    js_code = (
+        f"const core = require({json.dumps(str(core_path))});\n"
+        + _REAL_DOM_DELAYED_CAROUSEL_HARNESS_JS
+        + r"""
+const harness = createRealDomDelayedCarouselHarness();
+core.ProductCache.clear();
+(async () => {
+  const rightArrowDetectedBeforeScan = !!core.getCarouselRightButton(harness.gallery);
+  const result = await core.extractProductData(
+    harness.doc,
+    'https://shopee.vn/san-pham-i.78513158.28469164720',
+    { forceRescan: true }
+  );
+  console.log(JSON.stringify({
+    childCount: harness.gallery.childCount,
+    initialVisibleMedia: result.debug.initial_visible_gallery_media,
+    videoMedia: result.debug.video_media,
+    totalUniqueMedia: result.debug.total_unique_media,
+    rightArrowDetectedBeforeScan,
+    rightClicks: harness.rightClicks,
+    selectedSource: result.image_source,
+    status: result.extraction_status,
+    images: result.images,
+    imageCount: result.image_count
+  }));
+})().catch(error => { console.error(error); process.exit(1); });
+"""
+    )
+    result = subprocess.run(["node", "-e", js_code], capture_output=True, encoding="utf-8", check=True)
+    data = json.loads([line for line in result.stdout.splitlines() if line.startswith("{")][-1])
+
+    assert data["childCount"] == 7
+    assert data["initialVisibleMedia"] == 5
+    assert data["videoMedia"] == 1
+    assert data["initialVisibleMedia"] - data["videoMedia"] == 4
+    assert data["totalUniqueMedia"] == 10
+    assert data["rightArrowDetectedBeforeScan"] is True
+    assert data["rightClicks"] >= 1
+    assert data["selectedSource"] == "gallery_carousel"
+    assert data["status"] == "COMPLETE"
+    assert data["imageCount"] == 9
+    assert all("V1" not in url for url in data["images"])
+    assert all("@resize_" not in url for url in data["images"])
+
+
+def test_manual_extract_snapshot_and_product_result_keep_all_nine_images():
+    """Exercise content extraction, authoritative cache/RPC, and the one background builder end to end."""
+    core_path = EXTENSION_DIR / "extractor_core.js"
+    content_path = EXTENSION_DIR / "content.js"
+    background_path = EXTENSION_DIR / "background.js"
+    js_code = (
+        f"const fs = require('fs');\n"
+        f"const core = require({json.dumps(str(core_path))});\n"
+        f"const contentCode = fs.readFileSync({json.dumps(str(content_path))}, 'utf-8');\n"
+        f"const backgroundCode = fs.readFileSync({json.dumps(str(background_path))}, 'utf-8');\n"
+        + _REAL_DOM_DELAYED_CAROUSEL_HARNESS_JS
+        + r"""
+const productUrl = 'https://shopee.vn/san-pham-i.78513158.28469164720';
+const productKey = '78513158:28469164720';
+const harness = createRealDomDelayedCarouselHarness();
+let contentListener = null;
+let backgroundListener = null;
+let nativeMessageListener = null;
+const runtimeEvents = [];
+const snapshotResponses = [];
+const nativePosts = [];
+
+global.ShopeeExtractorCore = core;
+global.document = harness.doc;
+global.window = {
+  location: { href: productUrl },
+  addEventListener: () => {}
+};
+global.chrome = {
+  runtime: {
+    lastError: null,
+    sendMessage: (message, callback) => {
+      runtimeEvents.push(message);
+      if (callback) callback();
+    },
+    onMessage: { addListener: listener => { contentListener = listener; } }
+  }
+};
+core.ProductCache.clear();
+eval(contentCode);
+
+function sendToContent(request) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (!settled) reject(new Error(`Content response timed out for ${request.action || request.type}`));
+    }, 5000);
+    const respond = response => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(response);
+    };
+    contentListener(request, {}, respond);
+  });
+}
+
+global.chrome = {
+  runtime: {
+    id: 'kjkgdknadhnpigglcpjbgkkbcngclhgf',
+    lastError: null,
+    connectNative: () => ({
+      postMessage: message => { nativePosts.push(message); },
+      onMessage: {
+        addListener: listener => { nativeMessageListener = listener; },
+        removeListener: () => {}
+      },
+      onDisconnect: { addListener: () => {}, removeListener: () => {} },
+      disconnect: () => {}
+    }),
+    sendMessage: (message, callback) => {
+      runtimeEvents.push(message);
+      if (callback) callback();
+    },
+    onMessage: { addListener: listener => { backgroundListener = listener; } }
+  },
+  tabs: {
+    query: async () => [{ id: 77, url: productUrl, active: true, windowId: 1 }],
+    get: async id => ({ id, url: productUrl, active: true, windowId: 1 }),
+    create: async options => ({ id: 88, url: options.url, active: true, windowId: 1 }),
+    update: async id => ({ id, url: productUrl, active: true, windowId: 1 }),
+    remove: async () => {},
+    sendMessage: async (tabId, message) => {
+      if (tabId !== 77) throw new Error(`Unexpected tab ${tabId}`);
+      const response = await sendToContent(message);
+      if (message.type === 'GET_COMPLETE_SNAPSHOT') snapshotResponses.push(response);
+      return response;
+    },
+    onRemoved: { addListener: () => {} },
+    onUpdated: { addListener: () => {} }
+  },
+  windows: { update: async () => {} }
+};
+eval(backgroundCode);
+
+(async () => {
+  backgroundListener({ action: 'CONNECT_DESKTOP' }, {}, () => {});
+  nativeMessageListener({ type: 'bridge_status', desktop_connected: true, protocol_version: 1 });
+
+  const extractResponse = await sendToContent({
+    action: 'EXTRACT_PRODUCT_DATA',
+    forceRescan: false,
+    fullEnumeration: true
+  });
+  const cachedAfterExtract = core.ProductCache.get(productKey);
+
+  let manualResponse = null;
+  backgroundListener({
+    action: 'SEND_PRODUCT_TO_DESKTOP',
+    tabId: 77,
+    url: productUrl
+  }, {}, response => { manualResponse = response; });
+
+  const deadline = Date.now() + 5000;
+  while (!manualResponse && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+
+  const productResults = nativePosts.filter(message => message.type === 'product_result');
+  console.log(JSON.stringify({
+    initialVisibleMedia: extractResponse.data.debug.initial_visible_gallery_media,
+    visibleVideoMedia: extractResponse.data.debug.video_media,
+    extractCount: extractResponse.data.image_count,
+    extractStatus: extractResponse.data.extraction_status,
+    extractSource: extractResponse.data.image_source,
+    cacheCount: cachedAfterExtract.images.length,
+    snapshotCount: snapshotResponses[0].snapshot.image_count,
+    snapshotStatus: snapshotResponses[0].snapshot.scan_state,
+    manualResponse,
+    productResultCount: productResults.length,
+    productResultImageCount: productResults[0].data.image_count,
+    productResultImagesLength: productResults[0].data.images.length,
+    rightClicks: harness.rightClicks
+  }));
+})().catch(error => { console.error(error); process.exit(1); });
+"""
+    )
+    result = subprocess.run(["node", "-e", js_code], capture_output=True, encoding="utf-8", check=True)
+    data = json.loads([line for line in result.stdout.splitlines() if line.startswith("{")][-1])
+
+    assert data["initialVisibleMedia"] == 5
+    assert data["visibleVideoMedia"] == 1
+    assert data["rightClicks"] >= 1
+    assert data["extractSource"] == "gallery_carousel"
+    assert data["extractStatus"] == "COMPLETE"
+    assert data["extractCount"] == 9
+    assert data["cacheCount"] == 9
+    assert data["snapshotStatus"] == "COMPLETE"
+    assert data["snapshotCount"] == 9
+    assert data["manualResponse"]["success"] is True
+    assert data["productResultCount"] == 1
+    assert data["productResultImagesLength"] == 9
+    assert data["productResultImageCount"] == 9
+
+
+def test_complete_snapshot_rejects_a_stalled_visible_only_four_image_window():
+    """GET_COMPLETE_SNAPSHOT must fail clearly when the visible window cannot advance."""
+    core_path = EXTENSION_DIR / "extractor_core.js"
+    content_path = EXTENSION_DIR / "content.js"
+    js_code = (
+        f"const fs = require('fs');\n"
+        f"const core = require({json.dumps(str(core_path))});\n"
+        f"const contentCode = fs.readFileSync({json.dumps(str(content_path))}, 'utf-8');\n"
+        + _REAL_DOM_DELAYED_CAROUSEL_HARNESS_JS
+        + r"""
+const productUrl = 'https://shopee.vn/san-pham-i.78513158.28469164720';
+const productKey = '78513158:28469164720';
+const harness = createRealDomDelayedCarouselHarness();
+let contentListener = null;
+let stalledRightClicks = 0;
+const rightButton = harness.gallery.children[6];
+rightButton.click = () => { stalledRightClicks++; };
+
+global.ShopeeExtractorCore = core;
+global.document = harness.doc;
+global.window = { location: { href: productUrl }, addEventListener: () => {} };
+global.chrome = {
+  runtime: {
+    lastError: null,
+    sendMessage: (message, callback) => { if (callback) callback(); },
+    onMessage: { addListener: listener => { contentListener = listener; } }
+  }
+};
+core.ProductCache.clear();
+core.ProductCache.set(productKey, {
+  product_key: productKey,
+  product_name: 'Sản phẩm kiểm thử carousel',
+  shop_id: '78513158',
+  item_id: '28469164720',
+  images: ['I1', 'I2', 'I3', 'I4'],
+  image_count: 4,
+  image_source: 'gallery_carousel',
+  extraction_status: 'PARTIAL',
+  navigation_changed: false
+});
+eval(contentCode);
+
+(async () => {
+  const response = await new Promise(resolve => {
+    contentListener({ type: 'GET_COMPLETE_SNAPSHOT' }, {}, resolve);
+  });
+  console.log(JSON.stringify({
+    response,
+    stalledRightClicks,
+    cacheComplete: core.ProductCache.hasComplete(productKey),
+    cachedCount: core.ProductCache.get(productKey).images.length
+  }));
+})().catch(error => { console.error(error); process.exit(1); });
+"""
+    )
+    result = subprocess.run(["node", "-e", js_code], capture_output=True, encoding="utf-8", check=True)
+    data = json.loads([line for line in result.stdout.splitlines() if line.startswith("{")][-1])
+
+    assert data["stalledRightClicks"] >= 1
+    assert data["response"]["ok"] is False
+    assert data["response"]["error_code"] == "INCOMPLETE"
+    assert "snapshot" not in data["response"]
+    assert data["cacheComplete"] is False
+    assert data["cachedCount"] == 4

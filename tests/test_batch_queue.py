@@ -1,4 +1,4 @@
-"""Unit and integration tests for BatchQueueManager (Task 006Z)."""
+"""Unit and integration tests for the active BatchQueueManager."""
 
 from __future__ import annotations
 
@@ -185,46 +185,6 @@ def test_exact_duplicate_input_urls_queued_once() -> None:
     assert len(parsed) == 2
     assert parsed[0].url == "https://shopee.vn/product-1"
     assert parsed[1].url == "https://shopee.vn/product-2"
-
-
-def test_same_product_via_different_url_recognized(qtbot, queue_manager) -> None:
-    """Verify two different URLs resolving to the same shop_id:item_id are tracked in product identity map."""
-    valid_items = [
-        (0, "https://shopee.vn/short-1"),
-        (1, "https://shopee.vn/standard-product-1"),
-    ]
-
-    queue_manager.start_batch(valid_items)
-
-    req1 = queue_manager.current_item.request_id
-    queue_manager.handle_product_result(
-        BridgeProductData(
-            url="https://shopee.vn/short-1",
-            product_name="Same Product Name",
-            shop_id="999",
-            item_id="888",
-            images=["https://img.com/a.jpg"],
-            request_id=req1,
-        )
-    )
-
-    assert "999:888" in queue_manager._product_identity_map
-    assert queue_manager._product_identity_map["999:888"] == 0
-
-    req2 = queue_manager.current_item.request_id
-    queue_manager.handle_product_result(
-        BridgeProductData(
-            url="https://shopee.vn/standard-product-1",
-            product_name="Same Product Name",
-            shop_id="999",
-            item_id="888",
-            images=["https://img.com/a.jpg"],
-            request_id=req2,
-        )
-    )
-
-    # Both items recognized with same key
-    assert queue_manager.get_success_count() == 2
 
 
 def test_request_id_correlation_and_stale_results(qtbot, queue_manager) -> None:
@@ -515,5 +475,3 @@ def test_stale_event_after_advancing_is_ignored(qtbot, queue_manager) -> None:
     assert len(completed_events) == 1
     assert queue_manager.current_item.row_idx == 1
     assert queue_manager.current_item.request_id == req2
-
-

@@ -6,13 +6,14 @@ from PySide6.QtWebSockets import QWebSocket
 import pytest
 
 from shopee_image_downloader.core.bridge_protocol import (
-    CLIENT_IDENTIFIER,
     MSG_TYPE_HELLO,
     MSG_TYPE_PRODUCT_RESULT,
     PROTOCOL_VERSION,
     BridgeProductData,
 )
 from shopee_image_downloader.workers.bridge_worker import ExtensionBridgeServer
+
+NATIVE_HOST_CLIENT = "shopee_chrome_extension"
 
 
 @pytest.fixture
@@ -56,7 +57,7 @@ def test_server_handshake_hello_ack(qtbot, bridge_server):
     hello_msg = json.dumps({
         "type": MSG_TYPE_HELLO,
         "protocol_version": PROTOCOL_VERSION,
-        "client": CLIENT_IDENTIFIER,
+        "client": NATIVE_HOST_CLIENT,
     })
 
     with qtbot.waitSignal(bridge_server.connection_status_changed, timeout=2000) as blocker:
@@ -154,7 +155,7 @@ def test_server_disconnect_and_reconnect(qtbot, bridge_server):
     hello_msg = json.dumps({
         "type": MSG_TYPE_HELLO,
         "protocol_version": PROTOCOL_VERSION,
-        "client": CLIENT_IDENTIFIER,
+        "client": NATIVE_HOST_CLIENT,
     })
 
     for cycle in range(2):
@@ -176,4 +177,3 @@ def test_server_disconnect_and_reconnect(qtbot, bridge_server):
             client_socket.close()
 
         assert blocker_disc.args == [False]
-

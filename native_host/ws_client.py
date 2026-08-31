@@ -14,9 +14,7 @@ from typing import Callable
 logger = logging.getLogger(__name__)
 
 # Frame Opcodes
-OPCODE_CONTINUATION = 0x0
 OPCODE_TEXT = 0x1
-OPCODE_BINARY = 0x2
 OPCODE_CLOSE = 0x8
 OPCODE_PING = 0x9
 OPCODE_PONG = 0xA
@@ -182,7 +180,6 @@ class SimpleWebSocketClient:
                     break
 
                 byte0, byte1 = header[0], header[1]
-                fin = bool(byte0 & 0x80)
                 opcode = byte0 & 0x0F
                 is_masked = bool(byte1 & 0x80)
                 payload_len = byte1 & 0x7F

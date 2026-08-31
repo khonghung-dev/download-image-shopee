@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- Consolidated the runtime around PySide6 → localhost WebSocket → Native Host → Chrome Native Messaging → service worker → content script → `extractor_core.js`.
+- Made `open_product` the sole automatic batch command and `sendCompleteProductToDesktop()` the sole extension `product_result` builder.
+- Made the content script the single extraction RPC boundary for automatic and manual flows.
+- Rewrote architecture, testing, task, and extension documentation around the active runtime.
+
+### Fixed
+- Restored manual Chrome Extension full-gallery traversal by waiting for ordered carousel media identities to advance, excluding video media, and refusing to promote a visible-only four-image window to `COMPLETE`.
+
+### Removed
+- Removed the unused Python browser-session, authentication, URL-resolver, metadata-extractor, and associated worker implementations.
+- Removed legacy browser-automation tests and stale architecture specifications.
+- Removed direct-extension WebSocket remnants, duplicate batch protocol aliases, popup extraction fallback, and obsolete message listeners.
+
+### Known
+- The known regression where automatic processing returns four images while manual extension extraction can return nine remains intentionally unfixed.
+
 ## [0.1.0] - 2026-08-30
 
 ### Added
@@ -19,4 +38,3 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - URL input parser and Shopee Vietnam domain validator (Task 003).
 - Native output folder selector and persistent settings manager (Task 004).
 - Shopee URL resolver engine (`ShopeeUrlResolver`), tracking parameter sanitizer, `shop_id`/`item_id` extractor, and asynchronous `UrlResolverWorker` (`QThread`) with table status transitions (Task 005).
-

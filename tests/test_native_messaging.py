@@ -1,4 +1,4 @@
-"""Tests for Chrome Native Messaging Bridge (Task 006N)."""
+"""Tests for the active Chrome Native Messaging bridge."""
 
 from __future__ import annotations
 
@@ -156,8 +156,7 @@ def test_desktop_unavailable_handling() -> None:
     # Use an unused port where no server is listening
     host = NativeMessagingHost(port=59999, stdout_stream=mock_stdout)
 
-    # Process a get_status request
-    host.handle_incoming_message({"type": "get_status"})
+    host.handle_incoming_message({"type": "connect_desktop"})
 
     raw_output = mock_stdout.getvalue()
     assert len(raw_output) > 4
@@ -404,4 +403,3 @@ def test_native_host_lossless_relay_9_and_30_images() -> None:
     assert len(relayed_30["data"]["images"]) == 30
     assert relayed_30["data"]["image_count"] == 30
     assert relayed_30["data"]["images"][29] == "https://cf.shopee.vn/file/huge_gallery_img_30.jpg"
-

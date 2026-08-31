@@ -853,15 +853,6 @@
     return clickCarouselButton(getCarouselRightButton(container));
   }
 
-  /**
-   * Async sleep helper for carousel pagination DOM updates.
-   * @param {number} ms
-   * @returns {Promise<void>}
-   */
-  function delay(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-  }
-
   function captureGalleryObservation(container) {
     const mediaItems = getVisibleGalleryItems(container);
     return {
@@ -870,6 +861,92 @@
       leftControl: getCarouselControlState(getCarouselLeftButton(container)),
       rightControl: getCarouselControlState(getCarouselRightButton(container))
     };
+  }
+
+  /**
+   * Waits until a carousel click produces a different ordered media window.
+   * Shopee ignores additional arrow clicks while its transition is in flight, so
+   * a fixed delay followed by another click can falsely prove a boundary. Polling
+   * the canonical media identities (with MutationObserver wake-ups when available)
+   * keeps the wait bounded while ensuring the DOM has actually advanced.
+   *
+   * @param {Element} container
+   * @param {object} beforeObservation
+   * @param {{advanceTimeoutMs?: number, advancePollIntervalMs?: number, MutationObserver?: Function}} options
+   * @returns {Promise<{mediaChanged: boolean, observation: object}>}
+   */
+  async function waitForGalleryMediaChange(container, beforeObservation, options = {}) {
+    const timeoutMs = Number.isFinite(options.advanceTimeoutMs)
+      ? Math.max(0, options.advanceTimeoutMs)
+      : 500;
+    const pollIntervalMs = Number.isFinite(options.advancePollIntervalMs)
+      ? Math.max(5, options.advancePollIntervalMs)
+      : 20;
+    const ObserverCtor = options.MutationObserver || (
+      typeof MutationObserver !== 'undefined' ? MutationObserver : null
+    );
+    const beforeSignature = JSON.stringify(beforeObservation?.mediaIdentities || []);
+    const startedAt = Date.now();
+    let latestObservation = captureGalleryObservation(container);
+    let mutationWake = null;
+    let observer = null;
+
+    if (ObserverCtor) {
+      try {
+        observer = new ObserverCtor(() => {
+          if (mutationWake) mutationWake();
+        });
+        observer.observe(container, {
+          subtree: true,
+          childList: true,
+          attributes: true,
+          attributeFilter: [
+            'src', 'srcset', 'data-src', 'data-original', 'data-lazy-src',
+            'class', 'style', 'disabled', 'aria-disabled'
+          ]
+        });
+      } catch {
+        observer = null;
+      }
+    }
+
+    function waitForPollOrMutation(ms) {
+      return new Promise(resolve => {
+        let settled = false;
+        const finish = () => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timerId);
+          if (mutationWake === finish) mutationWake = null;
+          resolve();
+        };
+        const timerId = setTimeout(finish, ms);
+        mutationWake = finish;
+      });
+    }
+
+    try {
+      while (true) {
+        latestObservation = captureGalleryObservation(container);
+        const currentSignature = JSON.stringify(latestObservation.mediaIdentities);
+        if (currentSignature !== beforeSignature) {
+          return { mediaChanged: true, observation: latestObservation };
+        }
+
+        const elapsedMs = Date.now() - startedAt;
+        if (elapsedMs >= timeoutMs) break;
+        await waitForPollOrMutation(Math.min(pollIntervalMs, timeoutMs - elapsedMs));
+      }
+    } finally {
+      mutationWake = null;
+      if (observer) {
+        try {
+          observer.disconnect();
+        } catch {}
+      }
+    }
+
+    return { mediaChanged: false, observation: latestObservation };
   }
 
   function createGalleryStabilitySession(options = {}) {
@@ -1042,11 +1119,10 @@
    * Normalizes the gallery carousel by repeatedly moving LEFT until confirmed at the beginning.
    *
    * @param {Element} container
-   * @param {{advanceDelayMs?: number, maxLeftAdvances?: number}} options
+   * @param {{advanceTimeoutMs?: number, advancePollIntervalMs?: number, maxLeftAdvances?: number}} options
    * @returns {Promise<{leftBoundary: string, leftAdvances: number}>}
    */
   async function rewindCarouselToBeginning(container, options = {}) {
-    const delayMs = options.advanceDelayMs !== undefined ? options.advanceDelayMs : 50;
     const maxLeftAdvances = options.maxLeftAdvances || 15;
 
     let leftAdvances = 0;
@@ -1084,13 +1160,12 @@
         break;
       }
 
+      const beforeObservation = captureGalleryObservation(container);
       if (!clickCarouselButton(leftBtn)) break;
 
       leftAdvances++;
 
-      if (delayMs > 0) {
-        await delay(delayMs);
-      }
+      await waitForGalleryMediaChange(container, beforeObservation, options);
 
       const currentFirstId = getLeftmostId();
       if (currentFirstId === prevFirstId) {
@@ -1118,11 +1193,10 @@
    * and advancing rightward until the end.
    *
    * @param {Element} galleryContainer
-   * @param {{advanceDelayMs?: number, maxAdvances?: number, galleryStabilitySession?: object, documentRef?: Document, productKey?: string}} options
+   * @param {{advanceTimeoutMs?: number, advancePollIntervalMs?: number, maxAdvances?: number, galleryStabilitySession?: object, documentRef?: Document, productKey?: string}} options
    * @returns {Promise<object>}
    */
   async function enumerateCompleteGallery(galleryContainer, options = {}) {
-    const advanceDelay = options.advanceDelayMs !== undefined ? options.advanceDelayMs : 60;
     const maxAdvances = options.maxAdvances || 15;
 
     const emptyResult = {
@@ -1240,6 +1314,7 @@
     let noNewStreak = 0;
     let rightBoundary = GalleryBoundaryState.UNKNOWN;
     let rightControlObserved = false;
+    let navigationChanged = false;
 
     while (rightAdvances < maxAdvances) {
       const rightBtn = getCarouselRightButton(galleryContainer);
@@ -1263,17 +1338,20 @@
         break;
       }
 
+      const beforeObservation = captureGalleryObservation(galleryContainer);
       const advanced = clickCarouselButton(rightBtn);
       if (!advanced) break;
 
       rightAdvances++;
 
-      // Wait briefly for DOM mutation / Shopee carousel update
-      if (advanceDelay > 0) {
-        await delay(advanceDelay);
-      }
+      const advanceResult = await waitForGalleryMediaChange(
+        galleryContainer,
+        beforeObservation,
+        options
+      );
+      if (advanceResult.mediaChanged) navigationChanged = true;
 
-      const currentItems = getVisibleGalleryItems(galleryContainer);
+      const currentItems = advanceResult.observation.mediaItems;
       const newItems = recordBatch(currentItems);
 
       if (newItems === 0) {
@@ -1289,9 +1367,10 @@
             )
           ) {
             rightBoundary = GalleryBoundaryState.CONFIRMED;
-          } else if (rightControlObserved) {
+          } else if (rightControlObserved && navigationChanged) {
             // Two actual right-control interactions with an unchanged ordered
-            // media window are behavioral end-of-carousel proof.
+            // media window prove the boundary only after an earlier interaction
+            // actually exposed a different media window.
             rightBoundary = GalleryBoundaryState.CONFIRMED;
           }
           break;
@@ -1324,6 +1403,7 @@
     const isComplete = (
       leftBoundary === GalleryBoundaryState.CONFIRMED &&
       rightBoundary === GalleryBoundaryState.CONFIRMED &&
+      navigationChanged &&
       finalImages.length > 0
     );
     const scanQuality = isComplete ? 'COMPLETE' : (finalImages.length > 0 ? 'PARTIAL' : 'FAILED');
@@ -1352,7 +1432,7 @@
       images: finalImages,
       scanQuality: scanQuality,
       completenessReason: completenessReason,
-      navigationChanged: false
+      navigationChanged: navigationChanged
     };
   }
 
@@ -1360,7 +1440,7 @@
    * Main Gallery extraction strategy using the button-driven Shopee carousel.
    *
    * @param {Document} doc
-   * @param {{advanceDelayMs?: number, maxAdvances?: number}} options
+   * @param {{advanceTimeoutMs?: number, advancePollIntervalMs?: number, maxAdvances?: number}} options
    * @returns {Promise<{found: boolean, images: string[], initialVisibleCount: number, carouselLeftAdvances: number, carouselRightAdvances: number, leftmostReached: boolean, rightmostReached: boolean, totalDiscoveredCount: number, imageMediaCount: number, videoMediaCount: number, unknownMediaCount: number, scanQuality: 'COMPLETE'|'PARTIAL'|'FAILED'}>}
    */
   async function extractMainGalleryImages(doc, options = {}) {
@@ -1659,9 +1739,15 @@
     const rightBoundary = data.right_boundary || data.rightBoundary ||
       data.debug?.right_boundary || GalleryBoundaryState.UNKNOWN;
 
+    const carouselNavigationValid = (
+      reason !== GalleryCompletenessReason.CAROUSEL_BOUNDS_CONFIRMED ||
+      data.navigation_changed !== false
+    );
+
     return (
       leftBoundary === GalleryBoundaryState.CONFIRMED &&
       rightBoundary === GalleryBoundaryState.CONFIRMED &&
+      carouselNavigationValid &&
       (
         reason === GalleryCompletenessReason.CAROUSEL_BOUNDS_CONFIRMED ||
         reason === GalleryCompletenessReason.STABLE_SINGLE_PAGE
@@ -1714,7 +1800,7 @@
    *
    * @param {Document} doc
    * @param {string} url
-   * @param {{advanceDelayMs?: number, maxAdvances?: number, forceRescan?: boolean}} options
+   * @param {{advanceTimeoutMs?: number, advancePollIntervalMs?: number, maxAdvances?: number, forceRescan?: boolean}} options
    * @returns {Promise<object>} Structured product result
    */
   async function extractProductData(doc, url, options = {}) {

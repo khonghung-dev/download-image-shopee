@@ -2,7 +2,7 @@
  * Shopee Product Extractor - Content Script
  * Executes in the context of the Shopee webpage.
  *
- * Implements the normal 006X product extraction lifecycle and broadcasts
+ * Runs the canonical product extraction lifecycle and broadcasts
  * AUTHORITATIVE_PRODUCT_COMPLETE event when product extraction reaches complete state.
  */
 
@@ -56,7 +56,7 @@
   }
 
   /**
-   * Runs the normal 006X product extraction lifecycle.
+   * Runs the canonical product extraction lifecycle.
    * Periodically checks or observes DOM until product achieves authoritative COMPLETE,
    * then emits AUTHORITATIVE_PRODUCT_COMPLETE to background.
    */
@@ -101,7 +101,7 @@
               lastEmittedProductKey = productKey;
               const snapshot = buildProductSnapshot(result, href);
 
-              console.log(`[006X COMPLETE]\nproduct_key=${productKey}\nimages=${snapshot.images.length}`);
+              console.log(`[EXTRACTION COMPLETE]\nproduct_key=${productKey}\nimages=${snapshot.images.length}`);
 
               // Emit authoritative complete event to background service worker
               if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
@@ -119,7 +119,7 @@
             break;
           }
         } catch (err) {
-          console.debug('[006X Lifecycle] Extraction attempt error:', err?.message || String(err));
+          console.debug('[Extraction lifecycle] Attempt error:', err?.message || String(err));
         }
 
         await new Promise((resolve) => setTimeout(resolve, LIFECYCLE_CHECK_INTERVAL_MS));
@@ -166,9 +166,10 @@
       };
     }
 
-    // Run extraction if not yet cached
+    // A missing/invalid authoritative cache entry must be replaced only by a
+    // fresh canonical full-gallery traversal. Never promote the visible window.
     try {
-      const result = await core.extractProductData(document, currentHref, { forceRescan: false });
+      const result = await core.extractProductData(document, currentHref, { forceRescan: true });
       if (result && isAuthoritativeComplete(result, core)) {
         const snapshot = buildProductSnapshot(result, currentHref);
         return {
@@ -210,16 +211,6 @@
     chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       if (!request || typeof request !== 'object') return false;
 
-      if (request.type === 'PING_SCANNER') {
-        sendResponse({
-          ok: true,
-          ready: true,
-          version: 1,
-          url: window.location.href
-        });
-        return false; // Synchronous response
-      }
-
       if (request.type === 'GET_COMPLETE_SNAPSHOT') {
         getCompleteSnapshotRPC(request)
           .then((res) => sendResponse(res))
@@ -234,7 +225,6 @@
         return true; // Keep message channel open for async response
       }
 
-      // Backward compatibility for popup
       if (request.action === 'EXTRACT_PRODUCT_DATA') {
         (async () => {
           try {
@@ -248,29 +238,34 @@
             }
 
             const currentUrl = window.location.href;
-            const forceRescan = request.forceRescan === true;
-            const result = await core.extractProductData(document, currentUrl, { forceRescan });
+            // Popup extraction is an authoritative manual request, not a request
+            // for whichever thumbnails are currently rendered. Always bypass a
+            // potentially stale result and await the canonical carousel scan.
+            const result = await core.extractProductData(
+              document,
+              currentUrl,
+              { forceRescan: true }
+            );
 
-            if (result) {
+            if (result && isAuthoritativeComplete(result, core)) {
               // If complete, broadcast event as well
-              if (isAuthoritativeComplete(result, core)) {
-                const snapshot = buildProductSnapshot(result, currentUrl);
-                if (result.product_key !== lastEmittedProductKey) {
-                  lastEmittedProductKey = result.product_key;
-                  chrome.runtime.sendMessage({
-                    type: 'AUTHORITATIVE_PRODUCT_COMPLETE',
-                    product_key: result.product_key,
-                    snapshot: snapshot
-                  }, () => {
-                    if (chrome.runtime.lastError) {}
-                  });
-                }
+              const snapshot = buildProductSnapshot(result, currentUrl);
+              if (result.product_key !== lastEmittedProductKey) {
+                lastEmittedProductKey = result.product_key;
+                chrome.runtime.sendMessage({
+                  type: 'AUTHORITATIVE_PRODUCT_COMPLETE',
+                  product_key: result.product_key,
+                  snapshot: snapshot
+                }, () => {
+                  if (chrome.runtime.lastError) {}
+                });
               }
               sendResponse({ success: true, data: result });
             } else {
               sendResponse({
                 success: false,
-                error: 'Không thể lấy dữ liệu sản phẩm.'
+                error: 'Bộ sưu tập ảnh chưa được duyệt đầy đủ; không thể trả về cửa sổ ảnh đang hiển thị.',
+                data: result || null
               });
             }
           } catch (err) {
@@ -279,15 +274,6 @@
               error: err.message || String(err)
             });
           }
-        })();
-        return true;
-      }
-
-      // Legacy RUN_FULL_SCAN compatibility handler for unit tests
-      if (request.type === 'RUN_FULL_SCAN') {
-        (async () => {
-          const res = await getCompleteSnapshotRPC(request);
-          sendResponse(res);
         })();
         return true;
       }

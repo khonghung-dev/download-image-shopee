@@ -2,7 +2,7 @@
  * Shopee Product Extractor - Background Service Worker
  * Manages Chrome Native Messaging bridge with the PySide6 desktop application.
  *
- * Task 006N & 006Z: Chrome Native Messaging Bridge & Unified Event-Driven Batch Queue
+ * Chrome Native Messaging bridge and event-driven batch queue.
  *
  * Transport Flow:
  * Desktop App (BatchQueueManager / ExtensionBridgeServer)
@@ -11,7 +11,7 @@
  *   ↓
  * Chrome Extension Background SW (background.js)
  *   ↓ navigate dedicated worker tab
- * Shopee Product Page (006X content.js + extractor_core.js)
+ * Shopee Product Page (content.js + extractor_core.js)
  *   ↓ reaches authoritative COMPLETE
  * content.js emits AUTHORITATIVE_PRODUCT_COMPLETE event
  *   ↓
@@ -20,7 +20,7 @@
  * Native Host EXE -> WebSocket -> PySide6 Desktop App
  *
  * Architectural Invariants:
- * 1. ZERO separate batch extractors: Reuses normal 006X content script lifecycle.
+ * 1. ZERO separate batch extractors: reuses the content-script lifecycle.
  * 2. ONE Dedicated Worker Tab: Reused across all URLs in the batch.
  * 3. ONE Canonical Sender: sendCompleteProductToDesktop() for both manual button & automatic batch.
  * 4. ONE Active Builder: Exactly 1 location building canonical product result payload.
@@ -302,7 +302,7 @@
 
   /**
    * Single Canonical Function to build and send an Authoritative Product Result to Desktop.
-   * Both manual user send ("Gửi sang ứng dụng") and Task 006Z batch execution MUST call this function.
+   * Both manual user send ("Gửi sang ứng dụng") and batch execution call this function.
    *
    * @param {{
    *   snapshot: {
@@ -385,13 +385,10 @@
     return sendToNativeHost(payload);
   }
 
-  // Alias for backward compatibility
-  const sendProductSnapshotToDesktop = sendCompleteProductToDesktop;
-
   /**
    * Handles OPEN_PRODUCT request from PySide6 Desktop.
    * Navigates the dedicated worker tab and arms the bounded timeout timer.
-   * Does NOT execute custom RPC polling; waits for normal 006X AUTHORITATIVE_PRODUCT_COMPLETE event.
+   * Waits for the content script's AUTHORITATIVE_PRODUCT_COMPLETE event.
    */
   async function handleOpenProductRequest(requestId, url) {
     if (currentTimeoutTimer) {
@@ -468,9 +465,6 @@
     }
   }
 
-  // Old automatic batch scanner path using RUN_FULL_SCAN RPC is disabled
-  const handleProcessUrlRequest = handleOpenProductRequest;
-
   function cleanupNativePort() {
     if (nativePort) {
       try {
@@ -497,7 +491,7 @@
         const errorMsg = msg.message || (wasConnectedBefore ? 'Mất kết nối với Desktop.' : 'Shopee Image Downloader chưa được mở.');
         broadcastStatus(BridgeState.DISCONNECTED, errorMsg, true);
       }
-    } else if (msg.type === 'open_product' || msg.type === 'process_url') {
+    } else if (msg.type === 'open_product') {
       const requestId = msg.request_id;
       const url = msg.url;
       if (requestId && url) {
@@ -584,7 +578,7 @@
   chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (!request) return false;
 
-    // 1. Authoritative COMPLETE event from 006X Content Script
+    // Authoritative COMPLETE event from the content script.
     if (request.type === 'AUTHORITATIVE_PRODUCT_COMPLETE') {
       const senderTabId = sender?.tab?.id;
       const snapshot = request.snapshot;
@@ -656,7 +650,7 @@
       return false; // Synchronous response
     }
 
-    if (request.action === 'CONNECT_DESKTOP' || request.action === 'CONNECT_BRIDGE') {
+    if (request.action === 'CONNECT_DESKTOP') {
       startUserInitiatedConnection();
       sendResponse({
         status: currentState,
@@ -668,25 +662,8 @@
       return false; // Synchronous response
     }
 
-    if (request.action === 'DISCONNECT_BRIDGE') {
-      if (nativePort) {
-        try {
-          nativePort.postMessage({ type: 'disconnect_desktop', protocol_version: PROTOCOL_VERSION });
-        } catch (e) {}
-      }
-      cleanupNativePort();
-      wasConnectedBefore = false;
-      lastErrorMessage = 'Đã ngắt kết nối.';
-      broadcastStatus(BridgeState.DISCONNECTED, 'Đã ngắt kết nối.', isHostInstalled);
-      sendResponse({
-        status: BridgeState.DISCONNECTED,
-        connected: false
-      });
-      return false; // Synchronous response
-    }
-
     // Manual Send ("Gửi sang ứng dụng")
-    if (request.action === 'SEND_PRODUCT_TO_DESKTOP' || request.action === 'MANUAL_SEND_CURRENT_PRODUCT') {
+    if (request.action === 'SEND_PRODUCT_TO_DESKTOP') {
       if (currentState !== BridgeState.CONNECTED || !nativePort) {
         sendResponse({
           success: false,
@@ -708,14 +685,23 @@
             }
           }
 
-          // Request authoritative snapshot from content script
+          if (!tabId) {
+            sendResponse({
+              success: false,
+              error: 'Không tìm thấy tab sản phẩm Shopee hiện tại.'
+            });
+            return;
+          }
+
           let snapRes = null;
-          if (tabId) {
-            try {
-              snapRes = await chrome.tabs.sendMessage(tabId, { type: 'GET_COMPLETE_SNAPSHOT' }, { frameId: 0 });
-            } catch (tabErr) {
-              console.warn('[Bridge] Content script GET_COMPLETE_SNAPSHOT failed, trying fallback payload:', tabErr);
-            }
+          try {
+            snapRes = await chrome.tabs.sendMessage(
+              tabId,
+              { type: 'GET_COMPLETE_SNAPSHOT' },
+              { frameId: 0 }
+            );
+          } catch (tabErr) {
+            console.warn('[Bridge] Content script GET_COMPLETE_SNAPSHOT failed:', tabErr);
           }
 
           if (snapRes && snapRes.ok && snapRes.snapshot) {
@@ -728,32 +714,6 @@
             sendResponse({
               success: sent,
               product_key: snapRes.snapshot.product_key
-            });
-            return;
-          }
-
-          // Fallback if payload provided from popup cache
-          if (request.payload) {
-            const pImages = Array.isArray(request.payload.images) ? request.payload.images : [];
-            const sent = sendCompleteProductToDesktop({
-              snapshot: {
-                schema_version: 1,
-                scan_state: 'COMPLETE',
-                product_key: `${request.payload.shop_id}:${request.payload.item_id}`,
-                product_name: request.payload.product_name,
-                shop_id: request.payload.shop_id,
-                item_id: request.payload.item_id,
-                final_url: request.payload.url || tabUrl || '',
-                images: pImages,
-                image_count: pImages.length
-              },
-              requestId: null,
-              inputUrl: request.payload.url || tabUrl,
-              source: 'manual'
-            });
-            sendResponse({
-              success: sent,
-              product_key: `${request.payload.shop_id}:${request.payload.item_id}`
             });
             return;
           }
