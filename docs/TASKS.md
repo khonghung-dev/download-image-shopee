@@ -13,6 +13,7 @@ This document tracks development milestones, specifications, and execution statu
 | **005** | Shopee URL Resolver | [x] Complete | [005-shopee-url-resolver.md](file:///d:/download-picture-shopee/docs/specs/005-shopee-url-resolver.md) |
 | **006** | Product Metadata Extractor | [x] Complete | [006-product-metadata-extractor.md](file:///d:/download-picture-shopee/docs/specs/006-product-metadata-extractor.md) |
 | **006A**| Shopee Authentication & Persistent Session | [x] Complete | [006a-shopee-auth-session.md](file:///d:/download-picture-shopee/docs/specs/006a-shopee-auth-session.md) |
+| **006X**| Chrome Extension Shopee Extraction Spike | [x] Complete | [006x-chrome-extension-spike.md](file:///d:/download-picture-shopee/docs/specs/006x-chrome-extension-spike.md) |
 | **007** | Image Download Engine & Extraction | [ ] Planned | - |
 | **008** | Progress Feedback & Batch Reporting | [ ] Planned | - |
 | **009** | Packaging & Windows Executable Distribution | [ ] Planned | - |
@@ -100,3 +101,15 @@ This document tracks development milestones, specifications, and execution statu
   - [x] Safe logout clearing the dedicated `ChromeUserData` profile safely without touching user personal browser profiles.
   - [x] Action button guard displaying `"Vui lòng đăng nhập Shopee trước."` when unauthenticated.
   - [x] Unit test suite in [tests/test_auth_session.py](file:///d:/download-picture-shopee/tests/test_auth_session.py) and UI tests in [tests/test_ui.py](file:///d:/download-picture-shopee/tests/test_ui.py).
+
+### Task 006X: Chrome Extension Shopee Extraction Spike
+- **Goal**: Implement a standard Google Chrome Manifest V3 extension to test the feasibility of extracting product name, Shop ID, Item ID, and main gallery images from a manually opened and authenticated Shopee product tab in the user's normal browser profile (`Thi Dieu Linh Tran`), without browser automation, CDP, or touching personal Chrome profile files on disk.
+- **Deliverables**:
+  - [x] Specification document in [006x-chrome-extension-spike.md](file:///d:/download-picture-shopee/docs/specs/006x-chrome-extension-spike.md).
+  - [x] Chrome Manifest V3 configuration in [chrome_extension/manifest.json](file:///d:/download-picture-shopee/chrome_extension/manifest.json) with strictly minimal permissions (`activeTab`, `scripting`, Shopee host domains).
+  - [x] Decoupled extraction engine in [chrome_extension/extractor_core.js](file:///d:/download-picture-shopee/chrome_extension/extractor_core.js) (URL parsing, title cleaning, JSON-LD extraction, DOM extraction, and CDN image URL normalization/filtering).
+  - [x] Content script in [chrome_extension/content.js](file:///d:/download-picture-shopee/chrome_extension/content.js) for in-page message handling.
+  - [x] Extension popup in [chrome_extension/popup.html](file:///d:/download-picture-shopee/chrome_extension/popup.html) & [chrome_extension/popup.js](file:///d:/download-picture-shopee/chrome_extension/popup.js) with product details display, image count, thumbnail preview, JSON clipboard copy, and non-Shopee tab detection.
+  - [x] Manual installation and testing guide in [chrome_extension/README.md](file:///d:/download-picture-shopee/chrome_extension/README.md).
+  - [x] Isolated unit test suite in [tests/test_extension_extractor.py](file:///d:/download-picture-shopee/tests/test_extension_extractor.py).
+

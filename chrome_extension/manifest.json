@@ -1,0 +1,47 @@
+{
+  "manifest_version": 3,
+  "name": "Shopee Product Extractor",
+  "version": "1.0.0",
+  "description": "Feasibility spike extension to extract Shopee product details and gallery images from the active tab.",
+  "permissions": [
+    "activeTab",
+    "scripting"
+  ],
+  "host_permissions": [
+    "*://*.shopee.vn/*",
+    "*://*.shopee.sg/*",
+    "*://*.shopee.co.id/*",
+    "*://*.shopee.co.th/*",
+    "*://*.shopee.ph/*",
+    "*://*.shopee.my/*",
+    "*://*.shopee.com.br/*",
+    "*://*.shopee.tw/*",
+    "*://*.shopee.com/*",
+    "*://*.s.shopee.vn/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Shopee Product Extractor"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "*://*.shopee.vn/*",
+        "*://*.shopee.sg/*",
+        "*://*.shopee.co.id/*",
+        "*://*.shopee.co.th/*",
+        "*://*.shopee.ph/*",
+        "*://*.shopee.my/*",
+        "*://*.shopee.com.br/*",
+        "*://*.shopee.tw/*",
+        "*://*.shopee.com/*",
+        "*://*.s.shopee.vn/*"
+      ],
+      "js": [
+        "extractor_core.js",
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}
