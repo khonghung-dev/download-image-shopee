@@ -284,7 +284,7 @@ def test_main_window_bridge_ui_status_transitions(tmp_path: Path) -> None:
 
 
 def test_manual_product_reception_deduplicates_by_product_key(tmp_path: Path) -> None:
-    window, _, _ = _create_window(tmp_path)
+    window, _, _ = _create_window(tmp_path, with_output_folder=True)
     window._on_bridge_product_received(_product(name="Product v1", image_count=1))
     window._on_bridge_product_received(_product(name="Product v2", image_count=3))
     window._on_bridge_product_received(
@@ -298,8 +298,8 @@ def test_manual_product_reception_deduplicates_by_product_key(tmp_path: Path) ->
     window.close()
 
 
-def test_batch_preserves_received_four_image_result(tmp_path: Path) -> None:
-    """Cleanup must not synthesize missing images or alter the known four-image result."""
+def test_batch_preserves_authoritative_nine_image_result(tmp_path: Path) -> None:
+    """Folder creation must preserve the known authoritative nine-image result."""
     window, _, _ = _create_window(
         tmp_path,
         connected=True,
@@ -315,11 +315,13 @@ def test_batch_preserves_received_four_image_result(tmp_path: Path) -> None:
             shop_id="78513158",
             item_id="28469164720",
             name="Known regression product",
-            image_count=4,
+            image_count=9,
         )
     )
 
-    assert window.results_table.item(0, 3).text() == "4"
+    stored = window._products_by_product_key["78513158:28469164720"]
+    assert window.results_table.item(0, 3).text() == "9"
+    assert len(stored.images) == 9
     assert window.status_label.text() == "Hoàn tất: 1 thành công, 0 lỗi"
     window.close()
 
@@ -343,4 +345,85 @@ def test_batch_row_and_subsequent_manual_send_share_one_row(tmp_path: Path) -> N
     assert window.results_table.rowCount() == 1
     assert window.results_table.item(0, 1).text() == "Manual result"
     assert window.results_table.item(0, 3).text() == "9"
+    window.close()
+
+
+def test_product_success_creates_empty_folder_and_stores_path(tmp_path: Path) -> None:
+    """007A integrates after authoritative data without downloading images."""
+    window, _, _ = _create_window(
+        tmp_path,
+        connected=True,
+        with_output_folder=True,
+    )
+    window.url_input.setPlainText(
+        "https://shopee.vn/product-i.78513158.28469164720"
+    )
+    window.start_button.click()
+    request_id = window.queue_manager.current_item.request_id
+    product = _product(
+        request_id=request_id,
+        shop_id="78513158",
+        item_id="28469164720",
+        name="Túi đựng đồ du lịch CSHome",
+        image_count=9,
+    )
+
+    window._on_bridge_product_received(product)
+
+    stored = window._products_by_product_key[product.product_key]
+    assert stored.product_folder == tmp_path / "output" / product.product_name
+    assert stored.product_folder.is_dir()
+    assert list(stored.product_folder.iterdir()) == []
+    assert len(stored.images) == 9
+    assert stored.images == product.images
+    window.close()
+
+
+def test_folder_failure_marks_batch_item_failed(tmp_path: Path) -> None:
+    window, _, _ = _create_window(
+        tmp_path,
+        connected=True,
+        with_output_folder=True,
+    )
+    window.url_input.setPlainText("https://shopee.vn/product-i.1001.2001")
+    window.start_button.click()
+    request_id = window.queue_manager.current_item.request_id
+    window.output_folder_input.setText(str(tmp_path / "missing"))
+
+    window._on_bridge_product_received(_product(request_id=request_id))
+
+    assert window.results_table.item(0, 2).text() == "Không thể tạo thư mục sản phẩm."
+    assert window.status_label.text() == "Hoàn tất: 0 thành công, 1 lỗi"
+    window.close()
+
+
+def test_folder_failure_does_not_corrupt_next_queue_item(tmp_path: Path) -> None:
+    window, _, _ = _create_window(
+        tmp_path,
+        connected=True,
+        with_output_folder=True,
+    )
+    window.url_input.setPlainText(
+        "https://shopee.vn/product-i.1001.2001\n"
+        "https://shopee.vn/product-i.1002.2002"
+    )
+    window.start_button.click()
+    first_request_id = window.queue_manager.current_item.request_id
+    valid_output = window.output_folder_input.text()
+    window.output_folder_input.setText(str(tmp_path / "missing"))
+
+    window._on_bridge_product_received(
+        _product(request_id=first_request_id, shop_id="1001", item_id="2001")
+    )
+
+    second_request_id = window.queue_manager.current_item.request_id
+    window.output_folder_input.setText(valid_output)
+    window._on_bridge_product_received(
+        _product(request_id=second_request_id, shop_id="1002", item_id="2002")
+    )
+
+    stored = window._products_by_product_key["1002:2002"]
+    assert stored.product_folder is not None
+    assert stored.product_folder.is_dir()
+    assert window.status_label.text() == "Hoàn tất: 1 thành công, 1 lỗi"
     window.close()

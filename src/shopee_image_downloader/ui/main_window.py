@@ -1,5 +1,6 @@
 """Main window implementation for Shopee Image Downloader."""
 
+from dataclasses import replace
 import logging
 from pathlib import Path
 
@@ -37,6 +38,10 @@ from shopee_image_downloader.core.bridge_protocol import (
 )
 from shopee_image_downloader.core.url_validator import parse_url_lines
 from shopee_image_downloader.storage.settings import SettingsManager
+from shopee_image_downloader.storage.product_folder import (
+    ProductFolderError,
+    ensure_product_folder,
+)
 from shopee_image_downloader.workers.bridge_worker import ExtensionBridgeServer
 
 logger = logging.getLogger(__name__)
@@ -69,6 +74,7 @@ class MainWindow(QMainWindow):
         self._bridge_has_connected_before: bool = False
         self._rows_by_request_id: dict[str, int] = {}
         self._rows_by_product_key: dict[str, int] = {}
+        self._products_by_product_key: dict[str, BridgeProductData] = {}
 
         self._init_ui()
         self._restore_settings()
@@ -250,6 +256,7 @@ class MainWindow(QMainWindow):
 
         self._rows_by_request_id.clear()
         self._rows_by_product_key.clear()
+        self._products_by_product_key.clear()
         self.results_table.setRowCount(0)
         self.results_table.setRowCount(len(parsed_items))
 
@@ -361,6 +368,7 @@ class MainWindow(QMainWindow):
         key = product_data.product_key
         if key:
             self._rows_by_product_key[key] = row_idx
+            self._products_by_product_key[key] = product_data
         if product_data.request_id:
             self._rows_by_request_id[product_data.request_id] = row_idx
 
@@ -380,6 +388,8 @@ class MainWindow(QMainWindow):
             f"URL: {product_data.url or product_data.final_url}",
             f"Số ảnh: {len(product_data.images)}",
         ]
+        if product_data.product_folder is not None:
+            tooltip_parts.append(f"Thư mục: {product_data.product_folder}")
         tooltip_text = "\n".join(tooltip_parts)
         for col in range(4):
             item = self.results_table.item(row_idx, col)
@@ -464,8 +474,37 @@ class MainWindow(QMainWindow):
         # Batch results are owned by BatchQueueManager. It performs request
         # correlation and emits the single table-update event on success.
         if self.queue_manager.is_running:
+            current_item = self.queue_manager.current_item
+            if (
+                current_item is not None
+                and product_data.request_id
+                and product_data.request_id != current_item.request_id
+            ):
+                self.queue_manager.handle_product_result(product_data)
+                return
+            try:
+                product_data = self._with_product_folder(product_data)
+            except ProductFolderError as exc:
+                logger.exception("Không thể tạo thư mục sản phẩm: %s", exc)
+                if current_item is not None:
+                    self.queue_manager.handle_process_error(
+                        current_item.request_id,
+                        current_item.url,
+                        "PRODUCT_FOLDER_ERROR",
+                        "Không thể tạo thư mục sản phẩm.",
+                    )
+                return
             self.queue_manager.handle_product_result(product_data)
             return
+
+        try:
+            product_data = self._with_product_folder(product_data)
+        except ProductFolderError as exc:
+            logger.exception("Không thể tạo thư mục sản phẩm: %s", exc)
+            self.status_label.setText("Không thể tạo thư mục sản phẩm.")
+            return
+
+        self._products_by_product_key[product_data.product_key] = product_data
 
         # Determine target row_idx
         row_idx: int | None = None
@@ -517,6 +556,7 @@ class MainWindow(QMainWindow):
                 f"Item ID: {product_data.item_id}",
                 f"URL: {product_data.url or product_data.final_url}",
                 f"Số ảnh: {len(product_data.images)}",
+                f"Thư mục: {product_data.product_folder}",
             ]
             tooltip_text = "\n".join(tooltip_parts)
             for col in range(4):
@@ -527,6 +567,16 @@ class MainWindow(QMainWindow):
             self.status_label.setText(
                 f"Đã nhận từ Chrome: {product_data.product_name} ({len(product_data.images)} ảnh)"
             )
+
+    def _with_product_folder(self, product_data: BridgeProductData) -> BridgeProductData:
+        """Return the same product model with its desktop-owned folder attached."""
+        product_folder = ensure_product_folder(
+            self.output_folder_input.text().strip(),
+            product_data.product_name,
+            product_data.shop_id,
+            product_data.item_id,
+        )
+        return replace(product_data, product_folder=product_folder)
 
     def closeEvent(self, event: QCloseEvent) -> None:
         """Ensure the queue and bridge server stop cleanly on window close."""

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 import logging
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -41,6 +42,7 @@ class BridgeProductData:
     input_url: str = ""
     final_url: str = ""
     image_count: int | None = None
+    product_folder: Path | None = None
 
     @property
     def product_key(self) -> str:

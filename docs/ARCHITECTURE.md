@@ -36,8 +36,10 @@ When the user pastes URLs and clicks **Bắt đầu tải ảnh**, the exact cal
 12. A complete extraction is normalized by `buildProductSnapshot()` and emitted as `AUTHORITATIVE_PRODUCT_COMPLETE`.
 13. `background.js` correlates the worker tab, product key, and request ID, then calls the only final-result builder, `sendCompleteProductToDesktop()`.
 14. The `product_result` crosses Native Messaging, the Native Host WebSocket relay, `ExtensionBridgeServer._on_text_message()`, and `parse_bridge_product_data()`.
-15. `MainWindow._on_bridge_product_received()` hands correlated batch data to `BatchQueueManager.handle_product_result()`.
-16. The queue emits `item_completed`; `MainWindow._on_queue_item_completed()` updates the row once. The queue advances or finishes.
+15. `MainWindow._on_bridge_product_received()` asks the desktop-owned Product Folder Manager to create a safe child directory under the selected output root.
+16. The resulting `Path` is attached to the existing `BridgeProductData.product_folder` field without changing the authoritative name, IDs, or image list.
+17. `MainWindow` hands the correlated enriched model to `BatchQueueManager.handle_product_result()`.
+18. The queue emits `item_completed`; `MainWindow._on_queue_item_completed()` updates the row once. The queue advances or finishes. Folder failures use the queue's controlled per-item failure path.
 
 This is the single automatic batch flow. There is no `process_url` alias and no polling-based `RUN_FULL_SCAN` path.
 
@@ -57,8 +59,9 @@ This is the single automatic batch flow. There is no `process_url` alias and no 
 
 | Component | Owns | Must not own |
 |---|---|---|
-| `MainWindow` | User input, folder selection, result presentation, signal wiring | Shopee extraction, blocking network calls |
+| `MainWindow` | User input, folder selection, result presentation, signal wiring, desktop result integration | Shopee extraction, path-sanitization rules, blocking network calls |
 | `BatchQueueManager` | FIFO state, request correlation, timeout, verification pause/resume, cancellation | Browser/tab control, DOM extraction |
+| `storage/product_folder.py` | Windows-safe product folder naming, collision suffix, output-root validation and containment | Image downloading, duplicate-product semantics, UI presentation |
 | `ExtensionBridgeServer` | Loopback WebSocket lifecycle, inbound validation, Qt signals | Shopee business extraction |
 | Native Host | Native Messaging framing and localhost relay | Product construction, extraction, queue policy |
 | `background.js` | Native connection, worker tab, correlation, timeout, canonical outbound product message | DOM/gallery extraction |
@@ -94,7 +97,9 @@ The Native Host relays messages between the two transport boundaries but does no
 
 ## Storage and concurrency
 
-`SettingsManager` persists only the selected output folder. The desktop has no active image-download or Shopee HTTP extraction worker. Browser work occurs in Chrome; desktop transport is event-driven through Qt WebSockets and signals, so the Qt GUI thread does not perform blocking network I/O.
+`SettingsManager` persists only the selected output folder. `storage/product_folder.py` creates exactly one direct child for each successful item. It preserves Unicode, replaces Windows-invalid characters and ASCII controls, normalizes whitespace, protects reserved device names, falls back to `product_<shop_id>_<item_id>`, limits the component to 120 characters, and verifies resolved-path containment. If the primary title directory exists, the provisional Task 007A collision form is `<title> [<shop_id>-<item_id>]`; full duplicate semantics remain deferred to Task 012.
+
+The desktop has no active image-download or Shopee HTTP extraction worker. Product folders created by Task 007A remain empty. Browser work occurs in Chrome; desktop transport is event-driven through Qt WebSockets and signals, so the Qt GUI thread does not perform blocking network I/O.
 
 ## Required generated runtime artifact
 
