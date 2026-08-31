@@ -16,6 +16,7 @@ The suite is offline and protects the current architecture rather than deleted i
 | `test_extension_extractor.py` | Real JavaScript extractor behavior, service-worker state, worker tab, canonical sender, architecture boundaries |
 | `test_ui.py` | Current widgets, start guard, queue/bridge integration, single row updates, manual deduplication |
 | `test_product_folder.py` | Unicode/Windows sanitization, device names, fallback and length policy, containment, output-root failures, and provisional collisions |
+| `test_image_downloader.py` | Ordered filenames, MIME extensions, bounded retries/timeouts, invalid responses, atomic cleanup, existing-file skip, nine-image model integration, cancellation, and QThread execution |
 
 Deleted Playwright authentication, Python metadata-extractor, URL-resolver, and workaround-protocol tests are not part of the active suite.
 
@@ -51,7 +52,7 @@ JavaScript syntax checks require Node.js and are invoked by `test_extension_extr
 - No DOM extraction in `background.js`.
 - The Native Host/Desktop localhost WebSocket remains operational.
 - The known nine-image-plus-one-video product remains nine authoritative images in automatic and manual code paths.
-- Task 007A's desktop integration creates an empty folder, stores its `Path` on the existing product model, and preserves all nine image URLs unchanged.
+- Task 007A's desktop integration creates and stores the product folder `Path`; Task 007B writes all nine mock images there and preserves all nine authoritative URLs unchanged.
 
 ## Task 007A filesystem regressions
 
@@ -60,6 +61,19 @@ JavaScript syntax checks require Node.js and are invoked by `test_extension_extr
 - Trailing dots/spaces, reserved device basenames, empty titles, and overlong titles are made safe deterministically.
 - Path-like titles remain a single component whose resolved target is a direct child of the selected existing output root.
 - A primary-name collision uses `<name> [<shop_id>-<item_id>]` without overwriting the existing directory.
-- No image bytes or other files are written by Task 007A.
+- Task 007A unit tests still create directories only. Task 007B integration tests write controlled image files only inside those directories.
+
+## Task 007B downloader regressions
+
+- Tests use scripted/local HTTP responses only; they never access Shopee or its CDN.
+- Input order is authoritative: index 0 maps to `01`, index 1 to `02`, and so on regardless of response characteristics.
+- Padding is at least two digits and expands to three for a 120-image gallery.
+- Valid `image/jpeg`, `image/png`, and `image/webp` responses produce matching extensions and exact response bytes.
+- HTTP 500 and timeouts retry within the configured maximum; HTTP 404, HTML/JSON, and empty responses fail without inappropriate retries.
+- Failed and cancelled transfers leave no `.part` or corrupted final file, while earlier completed images remain.
+- A non-empty exact target is preserved byte-for-byte and reported as `SKIPPED_EXISTING`.
+- A nine-URL desktop product produces nine final files, `total=9`, `successful=9`, `failed=0`, and an unchanged nine-entry `images` list.
+- Queue tests prove that Product B is not opened when Product A merely receives its extension result; Product A's background image result must arrive first.
+- A Qt test records the downloader thread identity and verifies it differs from the GUI/test thread.
 
 Do not weaken extraction tests to make a failing implementation appear green. Record pre-existing failures separately from cleanup-introduced failures.

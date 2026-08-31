@@ -18,19 +18,21 @@ This file tracks the current architecture, not superseded implementation generat
 - [x] Restore manual full-carousel enumeration for the five-visible-media Shopee gallery (nine images plus one excluded video).
 - [x] Architecture cleanup removing browser automation, direct extension WebSockets, duplicate protocols, and obsolete tests.
 - [x] Task 007A: Windows-safe Product Folder Manager, desktop success-flow integration, and `product_folder` storage on the existing product model.
+- [x] Task 007B: authoritative `product.images` downloader using the Task 007A `product_folder`.
+- [x] Sequential MIME-aware filenames, bounded timeout/retry, atomic `.part` commits, and existing-file preservation.
+- [x] Background `QThread` download integration; queue completion now waits for the current product's image result.
+- [x] Ordered per-image results and product totals stored on the existing desktop product model.
 
 ## Frozen extraction regression
 
 - [x] Known nine-image-plus-one-video product produces nine authoritative images in the automatic flow.
 - [x] The manual extension send uses the same authoritative nine-image result path.
 
-Task 007A does not modify the extension, Native Host, bridge parser, gallery traversal, video filtering, or authoritative cache.
+Tasks 007A/007B do not modify the extension, Native Host, gallery traversal, video filtering, or authoritative cache. Task 007B only adds a desktop-only result field to the parsed desktop model.
 
 ## Planned product work
 
-- [ ] Task 007B: download image bytes outside the Qt GUI thread into `product_folder`.
-- [ ] Write image files atomically with retries and per-item error reporting.
 - [ ] Task 012: replace the provisional folder collision suffix with full duplicate-product handling.
 - [ ] Package and verify the full desktop application distribution.
 
-Task 007A creates directories only. It does not issue image HTTP requests or write any files inside product directories.
+Task 007A remains the sole owner of directory creation. Task 007B writes only controlled sequential image files inside that validated directory and does not implement broader duplicate-product policy.

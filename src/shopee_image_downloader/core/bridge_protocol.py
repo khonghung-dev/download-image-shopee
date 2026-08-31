@@ -8,6 +8,8 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from shopee_image_downloader.core.image_downloader import ProductDownloadResult
+
 logger = logging.getLogger(__name__)
 
 # Protocol Configuration Constants
@@ -43,6 +45,7 @@ class BridgeProductData:
     final_url: str = ""
     image_count: int | None = None
     product_folder: Path | None = None
+    download_result: ProductDownloadResult | None = None
 
     @property
     def product_key(self) -> str:

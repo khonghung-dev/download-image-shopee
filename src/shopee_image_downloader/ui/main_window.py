@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
 from shopee_image_downloader.core.batch_queue import (
     BatchQueueManager,
     QueueState,
+    STATUS_DISPLAY_DOWNLOADING,
     STATUS_DISPLAY_NAVIGATING,
     STATUS_DISPLAY_SUCCESS,
     STATUS_DISPLAY_VERIFICATION,
@@ -36,6 +37,7 @@ from shopee_image_downloader.core.bridge_protocol import (
     create_cancel_processing_message,
     create_open_product_message,
 )
+from shopee_image_downloader.core.image_downloader import ProductDownloadResult
 from shopee_image_downloader.core.url_validator import parse_url_lines
 from shopee_image_downloader.storage.settings import SettingsManager
 from shopee_image_downloader.storage.product_folder import (
@@ -43,6 +45,9 @@ from shopee_image_downloader.storage.product_folder import (
     ensure_product_folder,
 )
 from shopee_image_downloader.workers.bridge_worker import ExtensionBridgeServer
+from shopee_image_downloader.workers.image_download_worker import (
+    ImageDownloadController,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +66,7 @@ class MainWindow(QMainWindow):
         parent: QWidget | None = None,
         settings_manager: SettingsManager | None = None,
         bridge_server: ExtensionBridgeServer | None = None,
+        image_download_controller: ImageDownloadController | None = None,
         start_bridge: bool = True,
     ) -> None:
         super().__init__(parent)
@@ -70,6 +76,9 @@ class MainWindow(QMainWindow):
         self.settings_manager = settings_manager or SettingsManager()
         self.bridge_server = bridge_server or ExtensionBridgeServer(parent=self)
         self.queue_manager = BatchQueueManager(parent=self)
+        self.image_download_controller = (
+            image_download_controller or ImageDownloadController(parent=self)
+        )
         self._start_bridge = start_bridge
         self._bridge_has_connected_before: bool = False
         self._rows_by_request_id: dict[str, int] = {}
@@ -94,11 +103,25 @@ class MainWindow(QMainWindow):
         self.queue_manager.send_cancel_requested.connect(self._on_queue_send_cancel)
         self.queue_manager.item_started.connect(self._on_queue_item_started)
         self.queue_manager.item_progress.connect(self._on_queue_item_progress)
+        self.queue_manager.item_download_requested.connect(
+            self._on_queue_item_download_requested
+        )
         self.queue_manager.item_completed.connect(self._on_queue_item_completed)
         self.queue_manager.item_failed.connect(self._on_queue_item_failed)
         self.queue_manager.verification_required.connect(self._on_queue_verification_required)
         self.queue_manager.progress_updated.connect(self._on_queue_progress_updated)
         self.queue_manager.batch_finished.connect(self._on_queue_batch_finished)
+
+        self.image_download_controller.progress.connect(
+            self._on_image_download_progress
+        )
+        self.image_download_controller.finished.connect(
+            self._on_image_download_finished
+        )
+        self.image_download_controller.failed.connect(self._on_image_download_failed)
+        self.image_download_controller.cancelled.connect(
+            self._on_image_download_cancelled
+        )
 
         if self._start_bridge:
             self.bridge_server.start_server()
@@ -236,12 +259,17 @@ class MainWindow(QMainWindow):
         """Handle start, cancel, or resume batch processing actions."""
         # 1. If currently RUNNING, action button acts as Cancel
         if self.queue_manager.state == QueueState.RUNNING:
+            self.image_download_controller.cancel()
             self.queue_manager.cancel_batch()
             return
 
         # 2. If PAUSED_VERIFICATION, action button acts as Resume (Tiếp tục)
         if self.queue_manager.state == QueueState.PAUSED_VERIFICATION:
             self.queue_manager.resume_verification()
+            return
+
+        if self.image_download_controller.is_busy:
+            self.status_label.setText("Đang dừng hoặc hoàn tất tải ảnh hiện tại.")
             return
 
         # 3. Output directory check
@@ -342,6 +370,26 @@ class MainWindow(QMainWindow):
         if status_item:
             status_item.setText(display_text)
 
+    def _on_queue_item_download_requested(
+        self,
+        row_idx: int,
+        product_data: BridgeProductData,
+    ) -> None:
+        """Start the current batch item's download through the QThread controller."""
+        total = len(product_data.images)
+        self._update_table_row(
+            row_idx,
+            product_data,
+            status_text=f"{STATUS_DISPLAY_DOWNLOADING} 0/{total}",
+        )
+        if not self.image_download_controller.start(product_data):
+            request_id = product_data.request_id
+            if request_id:
+                self.queue_manager.handle_download_failure(
+                    request_id,
+                    "Không thể bắt đầu tải ảnh sản phẩm.",
+                )
+
     def _update_table_row(
         self,
         row_idx: int,
@@ -403,7 +451,11 @@ class MainWindow(QMainWindow):
 
     def _on_queue_item_completed(self, row_idx: int, product_data: BridgeProductData) -> None:
         """Handle item completion from queue manager."""
-        self._update_table_row(row_idx, product_data, status_text=STATUS_DISPLAY_SUCCESS)
+        self._update_table_row(
+            row_idx,
+            product_data,
+            status_text=self._download_status_text(product_data),
+        )
 
     def _on_queue_item_failed(self, row_idx: int, error_code: str, error_message: str) -> None:
         """Handle item failure from queue manager."""
@@ -433,10 +485,118 @@ class MainWindow(QMainWindow):
         """Handle overall batch completion."""
         self.start_button.setText("Bắt đầu tải ảnh")
         self.progress_bar.setValue(100)
-        self.status_label.setText(f"Hoàn tất: {success_count} thành công, {fail_count} lỗi")
+        if (
+            len(items) == 1
+            and items[0].product_data is not None
+            and items[0].product_data.download_result is not None
+        ):
+            self.status_label.setText(
+                self._download_status_text(items[0].product_data)
+            )
+        else:
+            self.status_label.setText(
+                f"Hoàn tất: {success_count} thành công, {fail_count} lỗi"
+            )
         # Notify Chrome Extension to restore user's original tab
         msg = create_batch_finished_message(success_count, fail_count)
         self.bridge_server.send_message(msg)
+
+    def _on_image_download_progress(
+        self,
+        product_data: BridgeProductData,
+        index: int,
+        total: int,
+    ) -> None:
+        """Show product image progress emitted from the background worker."""
+        row_idx = self._row_for_product(product_data)
+        progress_text = f"Đang tải ảnh {index}/{total}"
+        if row_idx is not None:
+            status_item = self.results_table.item(row_idx, 2)
+            if status_item:
+                status_item.setText(progress_text)
+        self.status_label.setText(progress_text)
+
+    def _on_image_download_finished(
+        self,
+        product_data: BridgeProductData,
+        result: object,
+    ) -> None:
+        """Attach a structured result and complete batch or manual presentation."""
+        if not isinstance(result, ProductDownloadResult):
+            self._on_image_download_failed(
+                product_data,
+                "Kết quả tải ảnh không hợp lệ.",
+            )
+            return
+
+        completed_product = replace(product_data, download_result=result)
+        current_item = self.queue_manager.current_item
+        if (
+            self.queue_manager.is_running
+            and current_item is not None
+            and completed_product.request_id == current_item.request_id
+        ):
+            self.queue_manager.handle_download_result(completed_product)
+            return
+
+        row_idx = self._row_for_product(completed_product)
+        if row_idx is not None:
+            status_text = self._download_status_text(completed_product)
+            self._update_table_row(row_idx, completed_product, status_text=status_text)
+            self.status_label.setText(status_text)
+
+    def _on_image_download_failed(
+        self,
+        product_data: BridgeProductData,
+        message: str,
+    ) -> None:
+        """Handle an unexpected product-level worker failure without a traceback."""
+        current_item = self.queue_manager.current_item
+        if (
+            self.queue_manager.is_running
+            and current_item is not None
+            and product_data.request_id == current_item.request_id
+        ):
+            self.queue_manager.handle_download_failure(current_item.request_id, message)
+            return
+
+        row_idx = self._row_for_product(product_data)
+        if row_idx is not None:
+            status_item = self.results_table.item(row_idx, 2)
+            if status_item:
+                status_item.setText(message)
+        self.status_label.setText(message)
+
+    def _on_image_download_cancelled(self, product_data: BridgeProductData) -> None:
+        """Keep queue cancellation authoritative; update standalone manual work."""
+        if self.queue_manager.is_running:
+            return
+        row_idx = self._row_for_product(product_data)
+        if row_idx is not None:
+            status_item = self.results_table.item(row_idx, 2)
+            if status_item:
+                status_item.setText("Đã hủy")
+
+    def _row_for_product(self, product_data: BridgeProductData) -> int | None:
+        """Resolve the existing table row without creating a duplicate model."""
+        if product_data.request_id:
+            row_idx = self._rows_by_request_id.get(product_data.request_id)
+            if row_idx is not None:
+                return row_idx
+        return self._rows_by_product_key.get(product_data.product_key)
+
+    @staticmethod
+    def _download_status_text(product_data: BridgeProductData) -> str:
+        """Return a concise Vietnamese terminal status for a product result."""
+        result = product_data.download_result
+        if result is None:
+            return STATUS_DISPLAY_SUCCESS
+        available = result.successful + result.skipped
+        if result.failed:
+            return f"Hoàn tất: {available}/{result.total} ảnh, {result.failed} lỗi"
+        if result.skipped:
+            return f"Hoàn tất: {available}/{result.total} ảnh, {result.skipped} đã có"
+        return f"Đã tải {result.successful}/{result.total} ảnh"
 
     def _on_bridge_status_changed(self, connected: bool) -> None:
         """Update Chrome Extension connection state in the UI."""
@@ -568,6 +728,17 @@ class MainWindow(QMainWindow):
                 f"Đã nhận từ Chrome: {product_data.product_name} ({len(product_data.images)} ảnh)"
             )
 
+        self._update_table_row(
+            row_idx,
+            product_data,
+            status_text=f"{STATUS_DISPLAY_DOWNLOADING} 0/{len(product_data.images)}",
+        )
+        if not self.image_download_controller.start(product_data):
+            self._on_image_download_failed(
+                product_data,
+                "Không thể bắt đầu tải ảnh sản phẩm.",
+            )
+
     def _with_product_folder(self, product_data: BridgeProductData) -> BridgeProductData:
         """Return the same product model with its desktop-owned folder attached."""
         product_folder = ensure_product_folder(
@@ -580,6 +751,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:
         """Ensure the queue and bridge server stop cleanly on window close."""
+        self.image_download_controller.cancel()
         self.queue_manager.cancel_batch()
         self.bridge_server.stop_server()
         super().closeEvent(event)

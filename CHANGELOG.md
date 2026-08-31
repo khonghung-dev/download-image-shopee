@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Added Task 007A's Windows-safe Product Folder Manager and stored `product_folder` on the existing desktop product model.
+- Added Task 007B's deterministic standard-library image downloader, MIME-aware sequential filenames, bounded retry/timeout policy, atomic `.part` writes, and structured per-image/product results.
+- Added a dedicated Qt worker/controller so image network transfers run outside the GUI thread and the batch queue waits for downloads before advancing.
+
 ### Changed
 - Consolidated the runtime around PySide6 → localhost WebSocket → Native Host → Chrome Native Messaging → service worker → content script → `extractor_core.js`.
 - Made `open_product` the sole automatic batch command and `sendCompleteProductToDesktop()` the sole extension `product_result` builder.
@@ -22,7 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Removed direct-extension WebSocket remnants, duplicate batch protocol aliases, popup extraction fallback, and obsolete message listeners.
 
 ### Known
-- The known regression where automatic processing returns four images while manual extension extraction can return nine remains intentionally unfixed.
+- Full duplicate/re-download semantics remain deferred to Task 012; Task 007B preserves a non-empty exact target and reports `SKIPPED_EXISTING`.
 
 ## [0.1.0] - 2026-08-30
 

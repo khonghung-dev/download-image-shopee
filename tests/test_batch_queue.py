@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+from pathlib import Path
+
 import pytest
 from PySide6.QtCore import QCoreApplication
 
@@ -18,6 +21,11 @@ from shopee_image_downloader.core.batch_queue import (
     STATUS_DISPLAY_VERIFICATION,
 )
 from shopee_image_downloader.core.bridge_protocol import BridgeProductData
+from shopee_image_downloader.core.image_downloader import (
+    ImageDownloadResult,
+    ImageDownloadStatus,
+    ProductDownloadResult,
+)
 from shopee_image_downloader.core.url_validator import parse_url_lines
 
 
@@ -25,7 +33,31 @@ from shopee_image_downloader.core.url_validator import parse_url_lines
 def queue_manager(qtbot) -> BatchQueueManager:
     """Fixture providing a BatchQueueManager instance with short timeout."""
     manager = BatchQueueManager(item_timeout_ms=500)
+    manager.item_download_requested.connect(
+        lambda _row, product: manager.handle_download_result(
+            _with_successful_download(product)
+        )
+    )
     return manager
+
+
+def _with_successful_download(product: BridgeProductData) -> BridgeProductData:
+    total = len(product.images)
+    padding = max(2, len(str(total)))
+    results = tuple(
+        ImageDownloadResult(
+            index=index,
+            source_url=url,
+            target_path=Path(f"{index:0{padding}d}.jpg"),
+            status=ImageDownloadStatus.SUCCESS,
+            attempts=1,
+        )
+        for index, url in enumerate(product.images, start=1)
+    )
+    return replace(
+        product,
+        download_result=ProductDownloadResult.from_items(total, results),
+    )
 
 
 def test_three_valid_urls_processed_sequentially(qtbot, queue_manager) -> None:
@@ -475,3 +507,100 @@ def test_stale_event_after_advancing_is_ignored(qtbot, queue_manager) -> None:
     assert len(completed_events) == 1
     assert queue_manager.current_item.row_idx == 1
     assert queue_manager.current_item.request_id == req2
+
+
+def test_queue_does_not_advance_until_image_download_finishes(qtbot) -> None:
+    manager = BatchQueueManager(item_timeout_ms=500)
+    started_rows: list[int] = []
+    requested_products: list[BridgeProductData] = []
+    manager.item_started.connect(
+        lambda row, _url, _request: started_rows.append(row)
+    )
+    manager.item_download_requested.connect(
+        lambda _row, product: requested_products.append(product)
+    )
+    manager.start_batch(
+        [
+            (0, "https://shopee.vn/product-1"),
+            (1, "https://shopee.vn/product-2"),
+        ]
+    )
+    request_id = manager.current_item.request_id
+    product = BridgeProductData(
+        url="https://shopee.vn/product-1",
+        product_name="Product 1",
+        shop_id="101",
+        item_id="201",
+        images=["https://img.example/1.jpg"],
+        image_count=1,
+        request_id=request_id,
+    )
+
+    manager.handle_product_result(product)
+
+    assert manager.current_item.state == ItemState.DOWNLOADING
+    assert started_rows == [0]
+    assert requested_products == [product]
+    assert manager.get_finished_count() == 0
+
+    manager.handle_download_result(_with_successful_download(product))
+
+    assert started_rows == [0, 1]
+    assert manager.current_item.row_idx == 1
+
+
+def test_partial_image_failure_is_completed_with_errors_and_batch_continues(
+    qtbot,
+) -> None:
+    manager = BatchQueueManager(item_timeout_ms=500)
+    completed: list[BridgeProductData] = []
+    manager.item_completed.connect(lambda _row, product: completed.append(product))
+    manager.start_batch(
+        [
+            (0, "https://shopee.vn/product-1"),
+            (1, "https://shopee.vn/product-2"),
+        ]
+    )
+    request_id = manager.current_item.request_id
+    product = BridgeProductData(
+        url="https://shopee.vn/product-1",
+        product_name="Product 1",
+        shop_id="101",
+        item_id="201",
+        images=[
+            "https://img.example/1.jpg",
+            "https://img.example/2.jpg",
+        ],
+        image_count=2,
+        request_id=request_id,
+    )
+    manager.handle_product_result(product)
+    per_image = (
+        ImageDownloadResult(
+            index=1,
+            source_url=product.images[0],
+            target_path=Path("01.jpg"),
+            status=ImageDownloadStatus.SUCCESS,
+            attempts=1,
+        ),
+        ImageDownloadResult(
+            index=2,
+            source_url=product.images[1],
+            target_path=Path("02.jpg"),
+            status=ImageDownloadStatus.FAILED,
+            attempts=3,
+            error="HTTP 500",
+        ),
+    )
+    completed_product = replace(
+        product,
+        download_result=ProductDownloadResult.from_items(2, per_image),
+    )
+
+    manager.handle_download_result(completed_product)
+
+    assert len(completed) == 1
+    assert manager._items[0].state == ItemState.COMPLETED_WITH_ERRORS
+    assert manager.current_item.row_idx == 1
+    assert manager.get_success_count() == 1
+    assert manager.get_fail_count() == 0

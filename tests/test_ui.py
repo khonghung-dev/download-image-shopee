@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import (
     QFileDialog,
     QLabel,
@@ -26,6 +27,11 @@ from shopee_image_downloader.core.batch_queue import (
     STATUS_DISPLAY_VERIFICATION,
 )
 from shopee_image_downloader.core.bridge_protocol import BridgeProductData
+from shopee_image_downloader.core.image_downloader import (
+    ImageDownloadResult,
+    ImageDownloadStatus,
+    ProductDownloadResult,
+)
 from shopee_image_downloader.storage.settings import SettingsManager
 from shopee_image_downloader.ui.main_window import MainWindow
 from shopee_image_downloader.workers.bridge_worker import ExtensionBridgeServer
@@ -33,11 +39,77 @@ from shopee_image_downloader.workers.bridge_worker import ExtensionBridgeServer
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 
+class ImmediateImageDownloadController(QObject):
+    """Deterministic UI-test double for the separately tested QThread controller."""
+
+    progress = Signal(object, int, int)
+    finished = Signal(object, object)
+    failed = Signal(object, str)
+    cancelled = Signal(object)
+
+    @property
+    def is_busy(self) -> bool:
+        return False
+
+    def start(self, product_data: BridgeProductData) -> bool:
+        assert product_data.product_folder is not None
+        total = len(product_data.images)
+        padding = max(2, len(str(total)))
+        items: list[ImageDownloadResult] = []
+        for index, source_url in enumerate(product_data.images, start=1):
+            target = product_data.product_folder / f"{index:0{padding}d}.jpg"
+            target.write_bytes(f"image-{index}".encode())
+            items.append(
+                ImageDownloadResult(
+                    index=index,
+                    source_url=source_url,
+                    target_path=target,
+                    status=ImageDownloadStatus.SUCCESS,
+                    attempts=1,
+                )
+            )
+            self.progress.emit(product_data, index, total)
+        self.finished.emit(
+            product_data,
+            ProductDownloadResult.from_items(total, items),
+        )
+        return True
+
+    def cancel(self) -> None:
+        return
+
+
+class HoldingImageDownloadController(QObject):
+    """Hold a product in DOWNLOADING until the test cancels it."""
+
+    progress = Signal(object, int, int)
+    finished = Signal(object, object)
+    failed = Signal(object, str)
+    cancelled = Signal(object)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.active_product: BridgeProductData | None = None
+        self.cancel_calls = 0
+
+    @property
+    def is_busy(self) -> bool:
+        return self.active_product is not None
+
+    def start(self, product_data: BridgeProductData) -> bool:
+        self.active_product = product_data
+        return True
+
+    def cancel(self) -> None:
+        self.cancel_calls += 1
+
+
 def _create_window(
     tmp_path: Path,
     *,
     connected: bool = False,
     with_output_folder: bool = False,
+    image_download_controller: QObject | None = None,
 ) -> tuple[MainWindow, MagicMock, SettingsManager]:
     create_application([])
     settings = SettingsManager(config_path=tmp_path / "settings.json")
@@ -51,6 +123,9 @@ def _create_window(
     window = MainWindow(
         settings_manager=settings,
         bridge_server=bridge,
+        image_download_controller=(
+            image_download_controller or ImmediateImageDownloadController()
+        ),
         start_bridge=False,
     )
     return window, bridge, settings
@@ -218,7 +293,7 @@ def test_main_window_batch_queue_ui_flow(tmp_path: Path, qtbot) -> None:
     window._on_bridge_product_received(
         _product(request_id=first_request, item_id="222", name="Sản phẩm 1")
     )
-    assert len(update_calls) == 1
+    assert len(update_calls) == 2
     assert len(sent_messages) == 2
 
     second_request = window.queue_manager.current_item.request_id
@@ -274,6 +349,40 @@ def test_main_window_batch_verification_resume_and_cancel(tmp_path: Path, qtbot)
     window.close()
 
 
+def test_cancel_during_download_stops_before_next_product(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    controller = HoldingImageDownloadController()
+    window, bridge, _ = _create_window(
+        tmp_path,
+        connected=True,
+        with_output_folder=True,
+        image_download_controller=controller,
+    )
+    qtbot.addWidget(window)
+    sent_messages: list[str] = []
+    bridge.send_message.side_effect = lambda message: sent_messages.append(message)
+    window.url_input.setPlainText(
+        "https://shopee.vn/product-1\nhttps://shopee.vn/product-2"
+    )
+    window.start_button.click()
+    request_id = window.queue_manager.current_item.request_id
+    window._on_bridge_product_received(_product(request_id=request_id))
+
+    assert window.queue_manager.current_item.state.value == "DOWNLOADING"
+    assert len(sent_messages) == 1
+
+    window.start_button.click()
+
+    assert controller.cancel_calls == 1
+    assert window.queue_manager.state == QueueState.IDLE
+    assert window.results_table.item(0, 2).text() == STATUS_DISPLAY_CANCELLED
+    sent_types = [json.loads(message)["type"] for message in sent_messages]
+    assert sent_types.count("open_product") == 1
+    window.close()
+
+
 def test_main_window_bridge_ui_status_transitions(tmp_path: Path) -> None:
     window, _, _ = _create_window(tmp_path)
     window._on_bridge_status_changed(True)
@@ -322,7 +431,7 @@ def test_batch_preserves_authoritative_nine_image_result(tmp_path: Path) -> None
     stored = window._products_by_product_key["78513158:28469164720"]
     assert window.results_table.item(0, 3).text() == "9"
     assert len(stored.images) == 9
-    assert window.status_label.text() == "Hoàn tất: 1 thành công, 0 lỗi"
+    assert window.status_label.text() == "Đã tải 9/9 ảnh"
     window.close()
 
 
@@ -348,8 +457,10 @@ def test_batch_row_and_subsequent_manual_send_share_one_row(tmp_path: Path) -> N
     window.close()
 
 
-def test_product_success_creates_empty_folder_and_stores_path(tmp_path: Path) -> None:
-    """007A integrates after authoritative data without downloading images."""
+def test_product_success_downloads_into_task_007a_folder_and_stores_result(
+    tmp_path: Path,
+) -> None:
+    """007B uses the 007A folder and preserves all authoritative URLs."""
     window, _, _ = _create_window(
         tmp_path,
         connected=True,
@@ -373,9 +484,15 @@ def test_product_success_creates_empty_folder_and_stores_path(tmp_path: Path) ->
     stored = window._products_by_product_key[product.product_key]
     assert stored.product_folder == tmp_path / "output" / product.product_name
     assert stored.product_folder.is_dir()
-    assert list(stored.product_folder.iterdir()) == []
+    assert [path.name for path in sorted(stored.product_folder.iterdir())] == [
+        f"{index:02d}.jpg" for index in range(1, 10)
+    ]
     assert len(stored.images) == 9
     assert stored.images == product.images
+    assert stored.download_result is not None
+    assert stored.download_result.total == 9
+    assert stored.download_result.successful == 9
+    assert stored.download_result.failed == 0
     window.close()
 
 

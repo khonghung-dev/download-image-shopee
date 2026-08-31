@@ -32,7 +32,9 @@ class ItemState(str, Enum):
     PENDING = "PENDING"
     NAVIGATING = "NAVIGATING"
     SCANNING = "SCANNING"
+    DOWNLOADING = "DOWNLOADING"
     SUCCESS = "SUCCESS"
+    COMPLETED_WITH_ERRORS = "COMPLETED_WITH_ERRORS"
     FAILED = "FAILED"
 
 
@@ -40,7 +42,8 @@ class ItemState(str, Enum):
 STATUS_DISPLAY_NAVIGATING: str = "Đang mở sản phẩm"
 STATUS_DISPLAY_WAITING: str = "Đang chờ Shopee tải"
 STATUS_DISPLAY_SCANNING: str = "Đang quét toàn bộ ảnh"
-STATUS_DISPLAY_SUCCESS: str = "Đã lấy dữ liệu"
+STATUS_DISPLAY_DOWNLOADING: str = "Đang tải ảnh"
+STATUS_DISPLAY_SUCCESS: str = "Đã tải ảnh"
 STATUS_DISPLAY_VERIFICATION: str = "Shopee yêu cầu xác minh"
 STATUS_DISPLAY_TIMEOUT: str = "Hết thời gian xử lý"
 STATUS_DISPLAY_FAILED: str = "Không thể tải trang"
@@ -62,8 +65,12 @@ class QueueItem:
 
     @property
     def is_finished(self) -> bool:
-        """Return True if item has reached a terminal state (SUCCESS or FAILED)."""
-        return self.state in (ItemState.SUCCESS, ItemState.FAILED)
+        """Return True if the item has reached any terminal state."""
+        return self.state in (
+            ItemState.SUCCESS,
+            ItemState.COMPLETED_WITH_ERRORS,
+            ItemState.FAILED,
+        )
 
 
 class BatchQueueManager(QObject):
@@ -77,6 +84,7 @@ class BatchQueueManager(QObject):
     state_changed = Signal(str)  # Emits new QueueState value
     item_started = Signal(int, str, str)  # (row_idx, url, request_id)
     item_progress = Signal(int, str, str)  # (row_idx, stage, display_text)
+    item_download_requested = Signal(int, object)  # (row_idx, BridgeProductData)
     item_completed = Signal(int, object)  # (row_idx, BridgeProductData)
     item_failed = Signal(int, str, str)  # (row_idx, error_code, error_message)
     verification_required = Signal(int, str, str)  # (row_idx, url, message)
@@ -132,8 +140,12 @@ class BatchQueueManager(QObject):
         return sum(1 for item in self._items if item.is_finished)
 
     def get_success_count(self) -> int:
-        """Return number of successfully extracted items."""
-        return sum(1 for item in self._items if item.state == ItemState.SUCCESS)
+        """Return products whose download phase reached a terminal result."""
+        return sum(
+            1
+            for item in self._items
+            if item.state in (ItemState.SUCCESS, ItemState.COMPLETED_WITH_ERRORS)
+        )
 
     def get_fail_count(self) -> int:
         """Return number of failed items."""
@@ -205,6 +217,9 @@ class BatchQueueManager(QObject):
             logger.debug(f"Bỏ qua process_progress cho request_id không khớp: {request_id} (hiện tại: {item.request_id if item else None})")
             return
 
+        if item.state == ItemState.DOWNLOADING:
+            return
+
         item.stage = stage
         display_text = STATUS_DISPLAY_NAVIGATING
         if stage == "navigating":
@@ -222,7 +237,7 @@ class BatchQueueManager(QObject):
         self.item_progress.emit(item.row_idx, stage, display_text)
 
     def handle_product_result(self, product_data: BridgeProductData) -> None:
-        """Handle successful product extraction result from Chrome Extension."""
+        """Accept extraction data and request background image downloading."""
         if self._state != QueueState.RUNNING:
             return
 
@@ -233,6 +248,10 @@ class BatchQueueManager(QObject):
         # Correlate with request_id if available
         if product_data.request_id and product_data.request_id != item.request_id:
             logger.warning(f"Bỏ qua product_result với request_id cũ/lệch: {product_data.request_id} (hiện tại: {item.request_id})")
+            return
+
+        if item.state == ItemState.DOWNLOADING:
+            logger.debug("Bỏ qua product_result lặp lại cho %s", item.request_id)
             return
 
         # Integrity Check: len(product_data.images) must match product_data.image_count if declared
@@ -250,8 +269,8 @@ class BatchQueueManager(QObject):
 
         self._timeout_timer.stop()
 
-        item.state = ItemState.SUCCESS
-        item.stage = "complete"
+        item.state = ItemState.DOWNLOADING
+        item.stage = "downloading"
         item.product_data = product_data
 
         logger.info(
@@ -260,7 +279,60 @@ class BatchQueueManager(QObject):
             len(product_data.images),
             len(product_data.images),
         )
+        self.item_progress.emit(
+            item.row_idx,
+            "downloading",
+            STATUS_DISPLAY_DOWNLOADING,
+        )
+        self.item_download_requested.emit(item.row_idx, product_data)
+
+    def handle_download_result(self, product_data: BridgeProductData) -> None:
+        """Finish the current item only after its image download loop completes."""
+        if self._state != QueueState.RUNNING:
+            return
+
+        item = self.current_item
+        if not item or item.state != ItemState.DOWNLOADING:
+            return
+        if product_data.request_id and product_data.request_id != item.request_id:
+            logger.warning(
+                "Bỏ qua kết quả tải ảnh với request_id cũ/lệch: %s",
+                product_data.request_id,
+            )
+            return
+
+        download_result = product_data.download_result
+        if download_result is None or download_result.total != len(product_data.images):
+            self.handle_download_failure(
+                item.request_id,
+                "Kết quả tải ảnh không đầy đủ.",
+            )
+            return
+
+        item.state = (
+            ItemState.COMPLETED_WITH_ERRORS
+            if download_result.failed
+            else ItemState.SUCCESS
+        )
+        item.stage = "complete"
+        item.product_data = product_data
+
         self.item_completed.emit(item.row_idx, product_data)
+        self.progress_updated.emit(self.get_finished_count(), len(self._items))
+        self._advance_queue()
+
+    def handle_download_failure(self, request_id: str, message: str) -> None:
+        """Mark an unexpected product-level downloader failure and continue."""
+        if self._state != QueueState.RUNNING:
+            return
+        item = self.current_item
+        if not item or item.request_id != request_id:
+            return
+
+        item.state = ItemState.FAILED
+        item.error_code = "IMAGE_DOWNLOAD_ERROR"
+        item.error_message = message
+        self.item_failed.emit(item.row_idx, "IMAGE_DOWNLOAD_ERROR", message)
         self.progress_updated.emit(self.get_finished_count(), len(self._items))
 
         self._advance_queue()
@@ -324,7 +396,12 @@ class BatchQueueManager(QObject):
         self._timeout_timer.stop()
 
         item = self.current_item
-        if item and item.state in (ItemState.PENDING, ItemState.NAVIGATING, ItemState.SCANNING):
+        if item and item.state in (
+            ItemState.PENDING,
+            ItemState.NAVIGATING,
+            ItemState.SCANNING,
+            ItemState.DOWNLOADING,
+        ):
             item.state = ItemState.FAILED
             item.error_code = "CANCELLED"
             item.error_message = STATUS_DISPLAY_CANCELLED

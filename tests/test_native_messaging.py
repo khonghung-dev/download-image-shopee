@@ -12,7 +12,7 @@ import threading
 import time
 
 import pytest
-from PySide6.QtCore import QCoreApplication
+from PySide6.QtCore import QCoreApplication, QObject, Signal
 
 # Add native_host and src to sys.path
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -30,6 +30,26 @@ from shopee_image_downloader.core.bridge_protocol import (
 )
 from shopee_image_downloader.workers.bridge_worker import ExtensionBridgeServer
 from shopee_image_downloader.ui.main_window import MainWindow
+from shopee_image_downloader.storage.settings import SettingsManager
+
+
+class SilentDownloadController(QObject):
+    """No-network test double for a UI-only duplicate-row regression."""
+
+    progress = Signal(object, int, int)
+    finished = Signal(object, object)
+    failed = Signal(object, str)
+    cancelled = Signal(object)
+
+    @property
+    def is_busy(self) -> bool:
+        return False
+
+    def start(self, product_data: BridgeProductData) -> bool:
+        return True
+
+    def cancel(self) -> None:
+        return
 
 
 class ChunkedBytesIO(io.BytesIO):
@@ -226,9 +246,17 @@ def test_desktop_available_handshake_and_product_relay(qtbot) -> None:
         host.ws_client.close()
 
 
-def test_duplicate_product_behavior_preserved(qtbot) -> None:
+def test_duplicate_product_behavior_preserved(qtbot, tmp_path: Path) -> None:
     """Verify MainWindow updates row for matching shop_id:item_id and appends for new item_id."""
-    window = MainWindow(start_bridge=False)
+    output_folder = tmp_path / "output"
+    output_folder.mkdir()
+    settings = SettingsManager(config_path=tmp_path / "settings.json")
+    settings.set_output_folder(output_folder)
+    window = MainWindow(
+        settings_manager=settings,
+        image_download_controller=SilentDownloadController(),
+        start_bridge=False,
+    )
     qtbot.addWidget(window)
 
     p1 = BridgeProductData(
