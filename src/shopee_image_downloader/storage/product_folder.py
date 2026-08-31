@@ -6,6 +6,14 @@ import logging
 from pathlib import Path
 import re
 
+from shopee_image_downloader.core.error_policy import (
+    AppError,
+    AppErrorException,
+    ErrorStage,
+    classify_error_code,
+    error_from_exception,
+)
+
 logger = logging.getLogger(__name__)
 
 MAX_PRODUCT_FOLDER_NAME_LENGTH: int = 120
@@ -18,8 +26,24 @@ _RESERVED_DEVICE_NAME = re.compile(
 )
 
 
-class ProductFolderError(RuntimeError):
+class ProductFolderError(AppErrorException):
     """Controlled failure while validating or creating a product folder."""
+
+    def __init__(
+        self,
+        error: AppError | str,
+        *,
+        error_code: str = "PRODUCT_FOLDER_ERROR",
+    ) -> None:
+        if isinstance(error, AppError):
+            app_error = error
+        else:
+            app_error = classify_error_code(
+                error_code,
+                stage=ErrorStage.FOLDER,
+                technical_message=error,
+            )
+        super().__init__(app_error)
 
 
 def _safe_identity_part(value: object | None) -> str:
@@ -83,14 +107,19 @@ def _validated_child(root: Path, component: str) -> Path:
     target = root / component
     try:
         resolved_target = target.resolve(strict=False)
-    except OSError as exc:
+    except (OSError, RuntimeError) as exc:
         raise ProductFolderError(
-            f"Không thể xác minh đường dẫn thư mục sản phẩm: {exc}"
+            error_from_exception(
+                exc,
+                stage=ErrorStage.FOLDER,
+                default_code="PRODUCT_FOLDER_ERROR",
+            )
         ) from exc
 
     if resolved_target.parent != root:
         raise ProductFolderError(
-            "Đường dẫn thư mục sản phẩm không nằm trong thư mục đầu ra."
+            "Đường dẫn thư mục sản phẩm không nằm trong thư mục đầu ra.",
+            error_code="PATH_CONTAINMENT_VIOLATION",
         )
     return target
 
@@ -107,18 +136,35 @@ def ensure_product_folder(
     If that identity-specific directory already exists, it is reused.
     """
     if output_root is None or not str(output_root).strip():
-        raise ProductFolderError("Chưa chọn thư mục đầu ra.")
+        raise ProductFolderError(
+            "Chưa chọn thư mục đầu ra.",
+            error_code="INVALID_OUTPUT_PATH",
+        )
 
     raw_root = Path(output_root)
     try:
         root = raw_root.resolve(strict=True)
     except (OSError, RuntimeError) as exc:
         raise ProductFolderError(
-            f"Thư mục đầu ra không tồn tại hoặc không khả dụng: {raw_root}"
+            f"Thư mục đầu ra không tồn tại hoặc không khả dụng: {raw_root}",
+            error_code="INVALID_OUTPUT_PATH",
         ) from exc
 
-    if not root.is_dir():
-        raise ProductFolderError(f"Đường dẫn đầu ra không phải thư mục: {root}")
+    try:
+        root_is_directory = root.is_dir()
+    except OSError as exc:
+        raise ProductFolderError(
+            error_from_exception(
+                exc,
+                stage=ErrorStage.FOLDER,
+                default_code="INVALID_OUTPUT_PATH",
+            )
+        ) from exc
+    if not root_is_directory:
+        raise ProductFolderError(
+            f"Đường dẫn đầu ra không phải thư mục: {root}",
+            error_code="INVALID_OUTPUT_PATH",
+        )
 
     folder_name = sanitize_product_folder_name(product_name, shop_id, item_id)
     fallback_name = _fallback_name(shop_id, item_id)
@@ -127,7 +173,8 @@ def ensure_product_folder(
     if primary.exists():
         if not primary.is_dir():
             raise ProductFolderError(
-                f"Tên thư mục sản phẩm đang bị một tệp chiếm dụng: {primary.name}"
+                f"Tên thư mục sản phẩm đang bị một tệp chiếm dụng: {primary.name}",
+                error_code="INVALID_OUTPUT_PATH",
             )
         if folder_name == fallback_name:
             return primary
@@ -144,15 +191,24 @@ def ensure_product_folder(
         if target.is_dir():
             return target
         raise ProductFolderError(
-            f"Không thể tạo thư mục vì đường dẫn đã tồn tại: {target}"
+            f"Không thể tạo thư mục vì đường dẫn đã tồn tại: {target}",
+            error_code="INVALID_OUTPUT_PATH",
         ) from exc
     except PermissionError as exc:
         raise ProductFolderError(
-            f"Không có quyền tạo thư mục trong: {root}"
+            error_from_exception(
+                exc,
+                stage=ErrorStage.FOLDER,
+                default_code="PERMISSION_DENIED",
+            )
         ) from exc
     except OSError as exc:
         raise ProductFolderError(
-            f"Lỗi hệ thống tệp khi tạo thư mục '{target.name}': {exc}"
+            error_from_exception(
+                exc,
+                stage=ErrorStage.FOLDER,
+                default_code="PRODUCT_FOLDER_ERROR",
+            )
         ) from exc
 
     logger.info("Đã tạo thư mục sản phẩm: %s", target)

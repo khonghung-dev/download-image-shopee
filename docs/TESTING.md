@@ -18,6 +18,7 @@ The suite is offline and protects the current architecture rather than deleted i
 | `test_product_folder.py` | Unicode/Windows sanitization, device names, fallback and length policy, containment, output-root failures, and provisional collisions |
 | `test_image_downloader.py` | Ordered filenames, MIME extensions, bounded retries/timeouts, invalid responses, atomic cleanup, existing-file skip, nine-image model integration, cancellation, and QThread execution |
 | `test_task_010_batch_reliability.py` | 10-item FIFO execution, middle-stage failure continuation, stale extraction/worker events, double start, cancellation terminalization, product isolation, GUI responsiveness, worker cleanup, and close-during-download |
+| `test_task_011_error_retry.py` | Canonical classification, product retry/exhaustion, verification, stale attempt generations, 429/4xx/5xx policy, permission/disk full, cancellation/close backoff safety, multi-product totals, and nine-image preservation |
 
 Deleted Playwright authentication, Python metadata-extractor, URL-resolver, and workaround-protocol tests are not part of the active suite.
 
@@ -90,5 +91,20 @@ JavaScript syntax checks require Node.js and are invoked by `test_extension_extr
 - Closing a visible window during a cooperative download defers the close until the controller is idle, with no remaining worker/thread references or `.part` files.
 
 Task 010 tests use synthetic models, test doubles, and local filesystem paths only. They do not access Shopee, change the extension/native stack, add generalized retry behavior, or implement Task 012 duplicate semantics.
+
+## Task 011 error/retry regressions
+
+- `PRODUCT_TIMEOUT` followed by success uses the same queue item and row, creates one product folder, and starts one download pipeline.
+- Three transient failures produce exactly three total attempts; the failed item then advances to the next product.
+- `NOT_FOUND` and output/path/permission errors fail on the first attempt without a backoff timer.
+- `VERIFICATION_REQUIRED` pauses the queue; manual resume preserves the attempt count and uses no automatic retry timer.
+- A new request ID is generated for each automatic attempt. Late results and errors carrying the prior ID cannot mutate or complete the current attempt.
+- Cancelling or closing during `WAITING_RETRY` stops the single-shot timer and cannot emit a later `open_product`.
+- HTTP 404 performs one request; HTTP 500 retries only to the configured maximum; HTTP 429 honors a valid `Retry-After` value clamped to the configured bound. Injected sleepers make these tests instantaneous.
+- Folder and download-write `PermissionError` plus `ENOSPC`/Windows disk-full classification are permanent. Disk-full performs one write attempt, leaves no `.part`, and preserves prior completed files.
+- Mixed `A transient→success / B not found / C success` input remains three products with `SUCCESS / FAILED / SUCCESS` terminal states.
+- A nine-image authoritative list remains unchanged through a product retry and entry into the folder/download pipeline.
+
+Task 011 tests are offline and use Qt timers, scripted HTTP responses, injected timing, and temporary local folders. Product-level automatic retry stops before folder creation; image-level retry remains owned solely by Task 007B.
 
 Do not weaken extraction tests to make a failing implementation appear green. Record pre-existing failures separately from cleanup-introduced failures.

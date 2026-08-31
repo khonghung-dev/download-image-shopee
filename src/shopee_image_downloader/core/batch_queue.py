@@ -10,6 +10,14 @@ import uuid
 from PySide6.QtCore import QObject, QTimer, Signal
 
 from shopee_image_downloader.core.bridge_protocol import BridgeProductData
+from shopee_image_downloader.core.error_policy import (
+    AppError,
+    ErrorCategory,
+    ErrorStage,
+    RetryPolicy,
+    classify_error_code,
+    error_from_exception,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +41,7 @@ class ItemState(str, Enum):
     PENDING = "PENDING"
     OPENING_PRODUCT = "OPENING_PRODUCT"
     WAITING_EXTRACTION = "WAITING_EXTRACTION"
+    WAITING_RETRY = "WAITING_RETRY"
     CREATING_FOLDER = "CREATING_FOLDER"
     DOWNLOADING = "DOWNLOADING"
     SUCCESS = "SUCCESS"
@@ -57,6 +66,7 @@ _ALLOWED_ITEM_TRANSITIONS: dict[ItemState, frozenset[ItemState]] = {
     ItemState.OPENING_PRODUCT: frozenset(
         {
             ItemState.WAITING_EXTRACTION,
+            ItemState.WAITING_RETRY,
             ItemState.CREATING_FOLDER,
             ItemState.FAILED,
             ItemState.CANCELLED,
@@ -65,7 +75,15 @@ _ALLOWED_ITEM_TRANSITIONS: dict[ItemState, frozenset[ItemState]] = {
     ItemState.WAITING_EXTRACTION: frozenset(
         {
             ItemState.OPENING_PRODUCT,
+            ItemState.WAITING_RETRY,
             ItemState.CREATING_FOLDER,
+            ItemState.FAILED,
+            ItemState.CANCELLED,
+        }
+    ),
+    ItemState.WAITING_RETRY: frozenset(
+        {
+            ItemState.OPENING_PRODUCT,
             ItemState.FAILED,
             ItemState.CANCELLED,
         }
@@ -99,7 +117,7 @@ STATUS_DISPLAY_CREATING_FOLDER: str = "Đang tạo thư mục"
 STATUS_DISPLAY_DOWNLOADING: str = "Đang tải ảnh"
 STATUS_DISPLAY_SUCCESS: str = "Đã tải ảnh"
 STATUS_DISPLAY_VERIFICATION: str = "Shopee yêu cầu xác minh"
-STATUS_DISPLAY_TIMEOUT: str = "Hết thời gian xử lý"
+STATUS_DISPLAY_TIMEOUT: str = "Hết thời gian chờ Shopee."
 STATUS_DISPLAY_FAILED: str = "Không thể tải trang"
 STATUS_DISPLAY_CANCELLED: str = "Đã hủy"
 
@@ -116,6 +134,11 @@ class QueueItem:
     product_data: BridgeProductData | None = None
     error_code: str | None = None
     error_message: str | None = None
+    error_stage: ErrorStage | None = None
+    attempt: int = 1
+    max_attempts: int = 1
+    next_retry_delay: float | None = None
+    last_error: AppError | None = None
 
     @property
     def url(self) -> str:
@@ -147,10 +170,12 @@ class BatchQueueManager(QObject):
     def __init__(
         self,
         item_timeout_ms: int = DEFAULT_ITEM_TIMEOUT_MS,
+        retry_policy: RetryPolicy | None = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self.item_timeout_ms = item_timeout_ms
+        self.retry_policy = retry_policy or RetryPolicy.product_default()
         self._state = QueueState.IDLE
         self._items: list[QueueItem] = []
         self._current_index = -1
@@ -159,6 +184,10 @@ class BatchQueueManager(QObject):
         self._timeout_timer = QTimer(self)
         self._timeout_timer.setSingleShot(True)
         self._timeout_timer.timeout.connect(self._on_item_timeout)
+
+        self._retry_timer = QTimer(self)
+        self._retry_timer.setSingleShot(True)
+        self._retry_timer.timeout.connect(self._on_retry_timeout)
 
     @property
     def state(self) -> QueueState:
@@ -266,6 +295,7 @@ class BatchQueueManager(QObject):
                     request_id=request_id,
                     row_idx=row_idx,
                     input_url=str(input_url),
+                    max_attempts=self.retry_policy.max_attempts,
                 )
             )
             self._known_request_ids.add(request_id)
@@ -287,7 +317,10 @@ class BatchQueueManager(QObject):
             return
 
         if verification_resume:
-            if item.state != ItemState.WAITING_EXTRACTION:
+            if item.state not in {
+                ItemState.WAITING_EXTRACTION,
+                ItemState.WAITING_RETRY,
+            }:
                 logger.warning(
                     "Không thể gửi lại %s từ trạng thái %s",
                     item.request_id,
@@ -307,12 +340,16 @@ class BatchQueueManager(QObject):
         item.stage = "opening_product"
         item.error_code = None
         item.error_message = None
+        item.error_stage = None
+        item.next_retry_delay = None
         logger.info(
-            "Bắt đầu sản phẩm [%d/%d]: row=%d, req=%s",
+            "Bắt đầu sản phẩm [%d/%d]: row=%d, req=%s, attempt=%d/%d",
             self._current_index + 1,
             len(self._items),
             item.row_idx,
             item.request_id,
+            item.attempt,
+            item.max_attempts,
         )
         self.item_started.emit(item.row_idx, item.input_url, item.request_id)
         self.item_progress.emit(
@@ -321,7 +358,13 @@ class BatchQueueManager(QObject):
             STATUS_DISPLAY_NAVIGATING,
         )
         self.send_open_product_requested.emit(item.request_id, item.input_url)
-        if self.item_timeout_ms > 0:
+        if (
+            self.item_timeout_ms > 0
+            and self._state == QueueState.RUNNING
+            and item is self.current_item
+            and item.state
+            in {ItemState.OPENING_PRODUCT, ItemState.WAITING_EXTRACTION}
+        ):
             self._timeout_timer.start(self.item_timeout_ms)
 
     def handle_process_progress(self, request_id: str, stage: str) -> None:
@@ -555,7 +598,18 @@ class BatchQueueManager(QObject):
         ):
             logger.warning("Bỏ qua lỗi worker cũ/lệch: %s", error_code)
             return
-        self._fail_current_item(error_code, message)
+        stage = (
+            ErrorStage.FOLDER
+            if item.state == ItemState.CREATING_FOLDER
+            else ErrorStage.DOWNLOAD
+        )
+        self._fail_current_item(
+            classify_error_code(
+                error_code,
+                stage=stage,
+                technical_message=message,
+            )
+        )
 
     def handle_download_failure(self, request_id: str, message: str) -> None:
         """Handle a synchronous controller start failure."""
@@ -567,7 +621,13 @@ class BatchQueueManager(QObject):
             or item.state != ItemState.CREATING_FOLDER
         ):
             return
-        self._fail_current_item("IMAGE_DOWNLOAD_ERROR", message)
+        self._fail_current_item(
+            classify_error_code(
+                "INTERNAL_ERROR",
+                stage=ErrorStage.DOWNLOAD,
+                technical_message=message,
+            )
+        )
 
     def handle_process_error(
         self,
@@ -596,12 +656,19 @@ class BatchQueueManager(QObject):
             return
 
         self._timeout_timer.stop()
-        if error_code == "VERIFICATION_REQUIRED":
+        error = classify_error_code(
+            error_code,
+            stage=ErrorStage.EXTRACTION,
+            technical_message=message,
+        )
+        if error.category == ErrorCategory.USER_ACTION_REQUIRED:
             if item.state == ItemState.OPENING_PRODUCT:
                 self._transition_item(item, ItemState.WAITING_EXTRACTION)
             item.stage = "waiting_verification"
-            item.error_code = error_code
-            item.error_message = message or STATUS_DISPLAY_VERIFICATION
+            item.error_code = error.error_code
+            item.error_message = error.user_message
+            item.error_stage = error.stage
+            item.last_error = error
             self._set_state(QueueState.PAUSED_VERIFICATION)
             self.verification_required.emit(
                 item.row_idx,
@@ -610,10 +677,10 @@ class BatchQueueManager(QObject):
             )
             return
 
-        self._fail_current_item(
-            error_code,
-            message or STATUS_DISPLAY_FAILED,
-        )
+        if self.retry_policy.should_retry(error, item.attempt):
+            self._schedule_retry(error)
+            return
+        self._fail_current_item(error)
 
     def resume_verification(self) -> bool:
         """Explicitly redispatch the same request after verification."""
@@ -637,6 +704,7 @@ class BatchQueueManager(QObject):
 
         logger.info("Yêu cầu hủy batch từ người dùng")
         self._timeout_timer.stop()
+        self._retry_timer.stop()
         self._set_state(QueueState.CANCELLING)
         item = self.current_item
 
@@ -681,20 +749,61 @@ class BatchQueueManager(QObject):
             self._cancel_item(item)
         self._finish_cancelled_batch()
 
-    def _fail_current_item(self, error_code: str, message: str) -> None:
+    def handle_internal_failure(
+        self,
+        request_id: str | None,
+        stage: ErrorStage,
+        exc: BaseException,
+    ) -> None:
+        """Turn one unexpected boundary exception into a controlled failure."""
+        item = self.current_item
+        if (
+            self._state != QueueState.RUNNING
+            or item is None
+            or item.request_id != request_id
+            or item.is_finished
+        ):
+            return
+        logger.exception(
+            "Lỗi queue ngoài dự kiến: req=%s row=%d attempt=%d stage=%s",
+            item.request_id,
+            item.row_idx,
+            item.attempt,
+            stage.value,
+        )
+        self._timeout_timer.stop()
+        self._retry_timer.stop()
+        self._fail_current_item(
+            error_from_exception(exc, stage=stage, default_code="INTERNAL_ERROR")
+        )
+
+    def _fail_current_item(self, error: AppError) -> None:
         item = self.current_item
         if item is None or not self._transition_item(item, ItemState.FAILED):
             return
         item.stage = "failed"
-        item.error_code = error_code
-        item.error_message = message
+        item.error_code = error.error_code
+        item.error_message = error.user_message
+        item.error_stage = error.stage
+        item.last_error = error
+        item.next_retry_delay = None
         logger.warning(
-            "Item %d thất bại [%s]: %s",
+            "Item %d thất bại: req=%s code=%s category=%s stage=%s "
+            "attempt=%d/%d technical=%s",
             item.row_idx + 1,
-            error_code,
-            message,
+            item.request_id,
+            error.error_code,
+            error.category.value,
+            error.stage.value,
+            item.attempt,
+            item.max_attempts,
+            error.technical_message,
         )
-        self.item_failed.emit(item.row_idx, error_code, message)
+        self.item_failed.emit(
+            item.row_idx,
+            error.error_code,
+            error.user_message,
+        )
         self.progress_updated.emit(self.get_finished_count(), len(self._items))
         self._advance_queue(item.request_id)
 
@@ -704,6 +813,13 @@ class BatchQueueManager(QObject):
         item.stage = "cancelled"
         item.error_code = "CANCELLED"
         item.error_message = STATUS_DISPLAY_CANCELLED
+        item.error_stage = ErrorStage.CANCEL
+        item.next_retry_delay = None
+        item.last_error = classify_error_code(
+            "CANCELLED",
+            stage=ErrorStage.CANCEL,
+            technical_message="User cancelled the batch",
+        )
         self.item_failed.emit(
             item.row_idx,
             item.error_code,
@@ -724,7 +840,66 @@ class BatchQueueManager(QObject):
             self.item_timeout_ms,
             item.row_idx + 1,
         )
-        self._fail_current_item("TIMEOUT", STATUS_DISPLAY_TIMEOUT)
+        error = classify_error_code(
+            "TIMEOUT",
+            stage=ErrorStage.EXTRACTION,
+            technical_message=(
+                f"Desktop extraction timeout after {self.item_timeout_ms}ms"
+            ),
+        )
+        if self.retry_policy.should_retry(error, item.attempt):
+            self._schedule_retry(error)
+            return
+        self._fail_current_item(error)
+
+    def _schedule_retry(self, error: AppError) -> None:
+        """Move the same logical item into event-driven extraction backoff."""
+        item = self.current_item
+        if (
+            item is None
+            or item.state
+            not in {ItemState.OPENING_PRODUCT, ItemState.WAITING_EXTRACTION}
+            or not self._transition_item(item, ItemState.WAITING_RETRY)
+        ):
+            return
+        delay = self.retry_policy.get_delay(item.attempt, error)
+        item.stage = "waiting_retry"
+        item.error_code = error.error_code
+        item.error_message = error.user_message
+        item.error_stage = error.stage
+        item.last_error = error
+        item.next_retry_delay = delay
+        next_attempt = item.attempt + 1
+        logger.warning(
+            "Chờ thử lại: req=%s row=%d code=%s stage=%s attempt=%d/%d "
+            "delay=%.3fs technical=%s",
+            item.request_id,
+            item.row_idx,
+            error.error_code,
+            error.stage.value,
+            item.attempt,
+            item.max_attempts,
+            delay,
+            error.technical_message,
+        )
+        self.item_progress.emit(
+            item.row_idx,
+            item.stage,
+            f"Đang thử lại {next_attempt}/{item.max_attempts}...",
+        )
+        self._retry_timer.start(max(0, round(delay * 1000)))
+
+    def _on_retry_timeout(self) -> None:
+        """Start the next transport generation for the same queue item."""
+        if self._state != QueueState.RUNNING:
+            return
+        item = self.current_item
+        if item is None or item.state != ItemState.WAITING_RETRY:
+            return
+        item.attempt += 1
+        item.request_id = f"req-{uuid.uuid4().hex[:12]}"
+        self._known_request_ids.add(item.request_id)
+        self._process_current_item(verification_resume=True)
 
     def _advance_queue(self, finalized_request_id: str) -> None:
         """Advance exactly once from the current terminal item."""
@@ -746,6 +921,7 @@ class BatchQueueManager(QObject):
 
     def _finish_batch(self) -> None:
         self._timeout_timer.stop()
+        self._retry_timer.stop()
         if self._state != QueueState.RUNNING:
             return
         success_count = self.get_success_count()
@@ -767,6 +943,7 @@ class BatchQueueManager(QObject):
 
     def _finish_cancelled_batch(self) -> None:
         self._timeout_timer.stop()
+        self._retry_timer.stop()
         if self._state != QueueState.CANCELLING:
             return
         self.progress_updated.emit(self.get_finished_count(), len(self._items))

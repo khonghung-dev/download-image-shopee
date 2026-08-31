@@ -173,11 +173,32 @@ class ExtensionBridgeServer(QObject):
 
         if not is_valid or parsed_data is None:
             logger.warning(f"Từ chối tin nhắn không hợp lệ: {error_msg}")
+            request_id = ""
+            source_url = ""
+            try:
+                raw_data = json.loads(message)
+                if isinstance(raw_data, dict):
+                    request_id = str(raw_data.get("request_id", "")).strip()
+                    inner = raw_data.get("data")
+                    if isinstance(inner, dict):
+                        source_url = str(
+                            inner.get("input_url") or inner.get("url") or ""
+                        ).strip()
+            except (json.JSONDecodeError, TypeError, ValueError):
+                pass
+            if request_id:
+                self.process_error_received.emit(
+                    request_id,
+                    source_url,
+                    "PROTOCOL_INTEGRITY_ERROR",
+                    error_msg or "Invalid bridge message",
+                )
             try:
                 socket.sendTextMessage(create_error_message(error_msg or "Tin nhắn không hợp lệ"))
             except Exception:
                 pass
-            self.error_occurred.emit(error_msg or "Tin nhắn không hợp lệ")
+            if not request_id:
+                self.error_occurred.emit(error_msg or "Tin nhắn không hợp lệ")
             return
 
         msg_type = parsed_data.get("type")
@@ -220,7 +241,16 @@ class ExtensionBridgeServer(QObject):
                 self.product_received.emit(product_data)
             except Exception as ex:
                 err = f"Lỗi xử lý product_result: {ex}"
-                logger.error(err)
+                logger.exception(err)
+                req_id = str(parsed_data.get("request_id", "")).strip()
+                if req_id:
+                    self.process_error_received.emit(
+                        req_id,
+                        "",
+                        "PROTOCOL_INTEGRITY_ERROR",
+                        err,
+                    )
                 socket.sendTextMessage(create_error_message(err))
-                self.error_occurred.emit(err)
+                if not req_id:
+                    self.error_occurred.emit(err)
             return

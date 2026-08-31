@@ -9,6 +9,13 @@ import threading
 from PySide6.QtCore import QObject, QThread, Signal, Slot
 
 from shopee_image_downloader.core.bridge_protocol import BridgeProductData
+from shopee_image_downloader.core.error_policy import (
+    AppError,
+    AppErrorException,
+    ErrorStage,
+    classify_error_code,
+    error_from_exception,
+)
 from shopee_image_downloader.core.image_downloader import (
     DownloadCancelledError,
     ImageDownloader,
@@ -64,15 +71,15 @@ class ImageDownloadWorker(QObject):
                     self._context.product.shop_id,
                     self._context.product.item_id,
                 )
-            except ProductFolderError:
+            except ProductFolderError as exc:
                 logger.exception(
-                    "Không thể tạo thư mục cho %s",
+                    "Không thể tạo thư mục cho %s: code=%s stage=%s technical=%s",
                     self._context.product.product_key,
+                    exc.error.error_code,
+                    exc.error.stage.value,
+                    exc.error.technical_message,
                 )
-                self._set_failure(
-                    "PRODUCT_FOLDER_ERROR",
-                    "Không thể tạo thư mục sản phẩm.",
-                )
+                self._set_failure(exc.error)
                 return
 
             self._context.product = replace(
@@ -92,28 +99,43 @@ class ImageDownloadWorker(QObject):
                 )
             except DownloadCancelledError:
                 self._context.terminal_kind = "cancelled"
-            except Exception:
+            except AppErrorException as exc:
+                logger.exception(
+                    "Lỗi tải ảnh có kiểm soát cho %s: code=%s stage=%s technical=%s",
+                    self._context.product.product_key,
+                    exc.error.error_code,
+                    exc.error.stage.value,
+                    exc.error.technical_message,
+                )
+                self._set_failure(exc.error)
+            except Exception as exc:
                 logger.exception(
                     "Lỗi không mong đợi khi tải ảnh cho %s",
                     self._context.product.product_key,
                 )
                 self._set_failure(
-                    "IMAGE_DOWNLOAD_ERROR",
-                    "Không thể hoàn tất tải ảnh sản phẩm.",
+                    error_from_exception(
+                        exc,
+                        stage=ErrorStage.DOWNLOAD,
+                        default_code="INTERNAL_ERROR",
+                    )
                 )
             else:
                 self._context.result = result
                 self._context.terminal_kind = "finished"
         except DownloadCancelledError:
             self._context.terminal_kind = "cancelled"
-        except Exception:
+        except Exception as exc:
             logger.exception(
                 "Worker pipeline bị lỗi ngoài dự kiến cho %s",
                 self._context.product.product_key,
             )
             self._set_failure(
-                "IMAGE_DOWNLOAD_ERROR",
-                "Không thể hoàn tất xử lý sản phẩm.",
+                error_from_exception(
+                    exc,
+                    stage=ErrorStage.DOWNLOAD,
+                    default_code="INTERNAL_ERROR",
+                )
             )
         finally:
             if self._context.cancel_event.is_set():
@@ -123,18 +145,21 @@ class ImageDownloadWorker(QObject):
                 self._context.error_message = None
             if self._context.terminal_kind is None:
                 self._set_failure(
-                    "IMAGE_DOWNLOAD_ERROR",
-                    "Worker kết thúc mà không có kết quả.",
+                    classify_error_code(
+                        "INTERNAL_ERROR",
+                        stage=ErrorStage.DOWNLOAD,
+                        technical_message="Worker ended without a terminal result",
+                    )
                 )
             self.done.emit()
 
     def _emit_progress(self, completed: int, total: int) -> None:
         self.progress.emit(self._context.product, completed, total)
 
-    def _set_failure(self, error_code: str, message: str) -> None:
+    def _set_failure(self, error: AppError) -> None:
         self._context.terminal_kind = "failed"
-        self._context.error_code = error_code
-        self._context.error_message = message
+        self._context.error_code = error.error_code
+        self._context.error_message = error.user_message
 
     def _raise_if_cancelled(self) -> None:
         if self._context.cancel_event.is_set():
@@ -272,8 +297,8 @@ class ImageDownloadController(QObject):
         else:
             self.failed.emit(
                 product,
-                context.error_code or "IMAGE_DOWNLOAD_ERROR",
-                context.error_message or "Không thể hoàn tất xử lý sản phẩm.",
+                context.error_code or "INTERNAL_ERROR",
+                context.error_message or "Lỗi nội bộ khi xử lý sản phẩm.",
             )
         self.idle.emit()
 

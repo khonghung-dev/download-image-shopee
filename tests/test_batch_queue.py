@@ -26,6 +26,7 @@ from shopee_image_downloader.core.image_downloader import (
     ImageDownloadStatus,
     ProductDownloadResult,
 )
+from shopee_image_downloader.core.error_policy import RetryPolicy
 from shopee_image_downloader.core.url_validator import parse_url_lines
 
 
@@ -283,7 +284,13 @@ def test_batch_cannot_start_twice(qtbot, queue_manager) -> None:
 def test_per_item_timeout_advances_queue(qtbot) -> None:
     """Verify that bounded per-item timeout marks item as TIMEOUT and advances to next."""
     # Fast 50ms timeout for unit test
-    manager = BatchQueueManager(item_timeout_ms=50)
+    manager = BatchQueueManager(
+        item_timeout_ms=50,
+        retry_policy=RetryPolicy(
+            max_attempts=1,
+            initial_delay_seconds=0,
+        ),
+    )
 
     valid_items = [
         (0, "https://shopee.vn/slow-item"),

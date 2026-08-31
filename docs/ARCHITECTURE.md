@@ -113,6 +113,7 @@ Each queue item has one lifecycle. `COMPLETED_WITH_ERRORS` preserves Task 007B's
 PENDING
   → OPENING_PRODUCT
   → WAITING_EXTRACTION
+  → WAITING_RETRY → OPENING_PRODUCT (transient extraction failure only)
   → CREATING_FOLDER
   → DOWNLOADING
   → SUCCESS | COMPLETED_WITH_ERRORS
@@ -123,13 +124,25 @@ Any non-terminal state during cancellation → CANCELLED
 
 The queue has at most one current product. Product B's `open_product` is emitted only after Product A's download worker has produced a terminal result, its `QThread` has finished, controller-owned worker/thread references have been cleared, and Product A has been finalized.
 
-`request_id` is mandatory for batch `product_result` events. Extraction progress and errors require the current request ID. Folder readiness, download progress, failure, cancellation, and completion additionally match product identity and the authoritative image list; download-phase events also match the exact product folder. Session-known stale request IDs remain classified as batch traffic after completion or cancellation and are ignored rather than reinterpreted as manual sends.
+`request_id` is mandatory for batch `product_result` events. Extraction progress and errors require the current request ID. Each automatic product retry creates a new transport request ID while retaining the same `QueueItem`, input URL, row, and ordering. The prior IDs remain session-known but no longer current, so late progress, errors, or results from an earlier attempt are ignored rather than completing a newer attempt or being reinterpreted as a manual send. Folder readiness, download progress, failure, cancellation, and completion additionally match product identity and the authoritative image list; download-phase events also match the exact product folder.
 
 Overall progress is `terminal items / total items`. Terminal items are `SUCCESS`, `COMPLETED_WITH_ERRORS`, `FAILED`, and `CANCELLED`; a currently downloading product does not increment it. Current-product progress is kept separately in its table row as `Đang tải ảnh n/total`. Final summaries derive success, failure, and cancellation counts from the terminal item states.
 
 Cancellation changes the queue to `CANCELLING`, prevents any new `open_product`, sends the existing Chrome cancellation message, and cooperatively signals an active worker. Pending inputs are marked `CANCELLED`. If extraction is still pending, the queue finalizes immediately and rejects later results. If a folder/download worker is active, batch completion waits for the worker's clean exit. The downloader checks cancellation between images and chunks, removes current `.part` files, and retains completed images.
 
 Closing the application uses the same cooperative path. A close event is deferred while a worker is active and retried from the controller's `idle` signal, avoiding both an unbounded GUI-thread wait and destruction of a running `QThread`.
+
+## Task 011 error and retry policy
+
+`core/error_policy.py` is the canonical desktop policy. `AppError` retains the existing error code, category, stage, Vietnamese user message, technical message, original exception type when available, retryability, and bounded `Retry-After` value. The categories are `TRANSIENT`, `PERMANENT`, `USER_ACTION_REQUIRED`, `CANCELLED`, and `INTERNAL`; stages are `VALIDATION`, `EXTRACTION`, `FOLDER`, `DOWNLOAD`, `PROTOCOL`, and `CANCEL`. Unknown codes default to `INTERNAL`, and protocol integrity/version/payload failures are never ordinary network retries.
+
+Existing extension/desktop codes are classified rather than renamed. `PRODUCT_TIMEOUT` and the desktop `TIMEOUT`, network interruption, connection reset, and temporary bridge loss are transient. `NOT_FOUND`, invalid URLs/output paths, folder containment failures, permission errors, disk full, unsupported responses, and permanent HTTP responses are permanent. `VERIFICATION_REQUIRED` is user-action-required, and `CANCELLED` remains cancellation.
+
+Product opening/extraction uses three total attempts. After transient failure of attempts one and two, `BatchQueueManager` enters the existing item's `WAITING_RETRY` state and schedules non-blocking one-second then two-second single-shot Qt timers. Exhaustion fails that product and continues the queue. Permanent/internal/protocol failures fail immediately. Folder/download failure never restarts the whole product, so Task 007B's per-image retries cannot multiply with product retries and a partial image result retains `COMPLETED_WITH_ERRORS` semantics.
+
+Verification is a pause, not an automatic retry: the queue enters `PAUSED_VERIFICATION`, waits for the user to verify in Chrome, and resumes the same item/request without consuming an attempt or starting a backoff timer. Cancellation or application close stops both extraction and retry timers, so a deferred callback cannot reopen the product.
+
+User-facing mappings include `Không tìm thấy sản phẩm.`, `Hết thời gian chờ Shopee.`, `Không thể tạo thư mục sản phẩm.`, `Không có quyền ghi vào thư mục đầu ra.`, `Không đủ dung lượng ổ đĩa.`, and `Shopee yêu cầu xác minh trên Chrome.` Technical details are logged with request ID, queue row, attempt, error code/category, and stage; cookies, credentials, tokens, and passwords are not logged.
 
 ## Storage, downloader policy, and concurrency
 
@@ -139,13 +152,13 @@ Task 007B accepts exactly `BridgeProductData.images`; it never discovers, filter
 
 The response `Content-Type` selects `.jpg`, `.png`, `.webp`, `.gif`, `.bmp`, `.tif`, or `.avif` when supported. Missing or `application/octet-stream` content types fall back to a recognized body signature, then an allow-listed URL suffix, then `.jpg` for the extension-less Shopee CDN case. Explicit HTML/JSON/unsupported MIME responses and empty bodies fail without a final image file.
 
-Every request uses minimal `User-Agent` and `Accept: image/*` headers. Central defaults are a 10-second connect bound, 15-second read bound, 30-second overall attempt bound, three total attempts, and 0.25-second incremental backoff. Timeouts, connection failures, HTTP 429, and HTTP 5xx are retryable; permanent HTTP errors and invalid media responses are not.
+Every request uses minimal `User-Agent` and `Accept: image/*` headers. Central defaults are a 10-second connect bound, 15-second read bound, 30-second overall attempt bound, three total attempts, and 0.25/0.5-second bounded backoff. Timeouts, connection failures, HTTP 429, and HTTP 5xx are retryable; HTTP 400/401/403/404 and other non-429 4xx responses, invalid media responses, permission failures, and disk-full writes are not. A valid HTTP 429 `Retry-After` delta/date is respected but clamped to 30 seconds; otherwise normal backoff applies.
 
 Each transfer writes `<sequential-name>.<ext>.part`, flushes and closes it, then atomically replaces an empty/missing final path. Handled failures and cancellation remove the current `.part`. A non-empty exact target is preserved and reported as `SKIPPED_EXISTING`; broader duplicate/re-download policy remains Task 012.
 
 `ProductDownloadResult` stores `total`, `successful`, `failed`, `skipped`, and ordered per-image results (`index`, `source_url`, `target_path`, `status`, `attempts`, `error`) on the existing product model. One failed image leaves prior valid files in place and produces `COMPLETED_WITH_ERRORS`; it does not abort the remaining image URLs or the following product.
 
-Product-folder creation and the blocking standard-library HTTP/file loop run only inside `ImageDownloadWorker` on a dedicated `QThread`. Products remain sequential: extraction A → folder A → all downloads A → worker cleanup A → terminal item A → extraction B. Retry/backoff remains the bounded Task 007B per-image policy; Task 010 adds no generalized retry framework. The Qt GUI thread performs only validation, orchestration, and presentation.
+Product-folder creation and the blocking standard-library HTTP/file loop run only inside `ImageDownloadWorker` on a dedicated `QThread`. Products remain sequential: extraction A → folder A → all downloads A → worker cleanup A → terminal item A → extraction B. Image backoff remains in that worker thread; product backoff is event-driven on the Qt GUI loop and never sleeps it. Permission/disk-full failures stop the current product write loop, retain completed files, and continue the batch safely. The Qt GUI thread performs only validation, orchestration, and presentation.
 
 ## Required generated runtime artifact
 

@@ -29,6 +29,12 @@ This file tracks the current architecture, not superseded implementation generat
 - [x] Task 010: cooperative cancellation of current/pending items and deferred safe application close during active downloads.
 - [x] Task 010: worker-owned folder creation and network/file work, leaving the Qt GUI thread responsive.
 - [x] Task 010: 10-product, middle-failure, stale-result, double-start, cancellation, responsiveness, cleanup, shutdown, and isolation regressions.
+- [x] Task 011: canonical `AppError` taxonomy and one error-code classification policy for extraction, protocol, folder, download, cancellation, and internal failures.
+- [x] Task 011: three-attempt product opening/extraction retry with non-blocking one/two-second backoff on the same queue item and row.
+- [x] Task 011: per-attempt request generation rejects stale results/errors; verification pause/resume consumes no automatic retry attempt.
+- [x] Task 011: downloader 429 bounded `Retry-After`, bounded 5xx retries, permanent 4xx handling, and no product-level double retry after image failures.
+- [x] Task 011: permanent output/permission/disk-full handling, controlled unexpected worker failure, and cancellation/close-safe retry timers.
+- [x] Task 011: transient/permanent/verification/stale/HTTP/storage/cancellation/multi-product/nine-image regressions.
 
 ## Frozen extraction regression
 
@@ -39,10 +45,11 @@ Tasks 007A/007B do not modify the extension, Native Host, gallery traversal, vid
 
 ## Planned product work
 
-- [ ] Task 011: generalized product retry/error UX and retrying failed batch items.
 - [ ] Task 012: replace the provisional folder collision suffix with full duplicate-product handling.
 - [ ] Package and verify the full desktop application distribution.
 
 Task 007A remains the sole owner of directory creation. Task 007B writes only controlled sequential image files inside that validated directory and does not implement broader duplicate-product policy.
 
 Task 010 does not change the Chrome Extension, Native Host, extraction protocol, gallery traversal, authoritative cache, Task 007B retry limits, or Task 012 duplicate-product policy.
+
+Task 011 adds automatic retries only for transient product opening/extraction failures. It does not add a manual retry button, rerun completed failed batches, change duplicate-product semantics, modify the extension/native architecture, or retry a whole product after Task 007B returns partial image failures.

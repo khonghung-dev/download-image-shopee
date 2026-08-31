@@ -38,6 +38,7 @@ from shopee_image_downloader.core.bridge_protocol import (
     create_open_product_message,
 )
 from shopee_image_downloader.core.image_downloader import ProductDownloadResult
+from shopee_image_downloader.core.error_policy import ErrorStage
 from shopee_image_downloader.core.url_validator import parse_url_lines
 from shopee_image_downloader.storage.settings import SettingsManager
 from shopee_image_downloader.workers.bridge_worker import ExtensionBridgeServer
@@ -350,7 +351,14 @@ class MainWindow(QMainWindow):
     def _on_queue_send_open_product(self, request_id: str, url: str) -> None:
         """Send open_product message to Chrome Extension via bridge."""
         msg = create_open_product_message(request_id, url)
-        self.bridge_server.send_message(msg)
+        sent = self.bridge_server.send_message(msg)
+        if sent is False:
+            self.queue_manager.handle_process_error(
+                request_id,
+                url,
+                "BRIDGE_DISCONNECTED",
+                "Native Host/Extension bridge is unavailable",
+            )
 
     def _on_queue_send_cancel(self, request_id: str) -> None:
         """Send cancel_processing message to Chrome Extension via bridge."""
@@ -363,11 +371,30 @@ class MainWindow(QMainWindow):
 
     def _on_bridge_process_progress_received(self, request_id: str, stage: str) -> None:
         """Forward process progress message from bridge to queue manager."""
-        self.queue_manager.handle_process_progress(request_id, stage)
+        try:
+            self.queue_manager.handle_process_progress(request_id, stage)
+        except Exception as exc:
+            self.queue_manager.handle_internal_failure(
+                request_id,
+                ErrorStage.EXTRACTION,
+                exc,
+            )
 
     def _on_bridge_process_error_received(self, request_id: str, url: str, error_code: str, message: str) -> None:
         """Forward process error message from bridge to queue manager."""
-        self.queue_manager.handle_process_error(request_id, url, error_code, message)
+        try:
+            self.queue_manager.handle_process_error(
+                request_id,
+                url,
+                error_code,
+                message,
+            )
+        except Exception as exc:
+            self.queue_manager.handle_internal_failure(
+                request_id,
+                ErrorStage.EXTRACTION,
+                exc,
+            )
 
     def _on_queue_item_started(self, row_idx: int, url: str, request_id: str) -> None:
         """Handle item start event from queue manager."""
@@ -646,6 +673,19 @@ class MainWindow(QMainWindow):
                 self.bridge_status_label.setText(STATUS_BRIDGE_LOST)
             else:
                 self.bridge_status_label.setText(STATUS_BRIDGE_DISCONNECTED)
+            current = self.queue_manager.current_item
+            if (
+                self.queue_manager.state == QueueState.RUNNING
+                and current is not None
+                and current.state.value
+                in {"OPENING_PRODUCT", "WAITING_EXTRACTION"}
+            ):
+                self.queue_manager.handle_process_error(
+                    current.request_id,
+                    current.input_url,
+                    "BRIDGE_DISCONNECTED",
+                    "Native Host/Extension bridge disconnected",
+                )
 
     def _on_bridge_error(self, error_message: str) -> None:
         """Handle errors reported by the WebSocket bridge."""
@@ -658,7 +698,14 @@ class MainWindow(QMainWindow):
         """
         req_id = product_data.request_id
         if self.queue_manager.is_known_request(req_id):
-            self.queue_manager.handle_product_result(product_data)
+            try:
+                self.queue_manager.handle_product_result(product_data)
+            except Exception as exc:
+                self.queue_manager.handle_internal_failure(
+                    req_id,
+                    ErrorStage.PROTOCOL,
+                    exc,
+                )
             return
 
         if self.queue_manager.is_active:
@@ -763,8 +810,8 @@ class MainWindow(QMainWindow):
         if not started:
             self._on_image_download_failed(
                 product_data,
-                "IMAGE_DOWNLOAD_ERROR",
-                "Không thể bắt đầu tải ảnh sản phẩm.",
+                "INTERNAL_ERROR",
+                "Lỗi nội bộ khi xử lý sản phẩm.",
             )
 
     def closeEvent(self, event: QCloseEvent) -> None:

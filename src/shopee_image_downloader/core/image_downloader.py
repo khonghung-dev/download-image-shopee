@@ -15,6 +15,20 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
+from shopee_image_downloader.core.error_policy import (
+    AppError,
+    AppErrorException,
+    DEFAULT_DOWNLOADER_BACKOFF_SECONDS,
+    DEFAULT_DOWNLOADER_MAX_ATTEMPTS,
+    DEFAULT_RETRY_AFTER_MAX_SECONDS,
+    ErrorStage,
+    RetryPolicy,
+    classify_error_code,
+    error_from_exception,
+    error_from_http_status,
+    parse_retry_after,
+)
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_USER_AGENT: str = (
@@ -57,8 +71,9 @@ class DownloadConfig:
     connect_timeout_seconds: float = 10.0
     read_timeout_seconds: float = 15.0
     overall_timeout_seconds: float = 30.0
-    max_attempts: int = 3
-    retry_backoff_seconds: float = 0.25
+    max_attempts: int = DEFAULT_DOWNLOADER_MAX_ATTEMPTS
+    retry_backoff_seconds: float = DEFAULT_DOWNLOADER_BACKOFF_SECONDS
+    max_retry_after_seconds: float = DEFAULT_RETRY_AFTER_MAX_SECONDS
     chunk_size: int = 64 * 1024
     user_agent: str = DEFAULT_USER_AGENT
 
@@ -71,6 +86,8 @@ class DownloadConfig:
             raise ValueError("max_attempts must be at least one.")
         if self.retry_backoff_seconds < 0:
             raise ValueError("retry_backoff_seconds cannot be negative.")
+        if self.max_retry_after_seconds < 0:
+            raise ValueError("max_retry_after_seconds cannot be negative.")
         if self.chunk_size < 1:
             raise ValueError("chunk_size must be at least one byte.")
 
@@ -78,6 +95,16 @@ class DownloadConfig:
     def socket_timeout_seconds(self) -> float:
         """Return the stricter urllib connect/read socket timeout."""
         return min(self.connect_timeout_seconds, self.read_timeout_seconds)
+
+    @property
+    def retry_policy(self) -> RetryPolicy:
+        """Build the shared policy using this downloader's injected limits."""
+        return RetryPolicy(
+            max_attempts=self.max_attempts,
+            initial_delay_seconds=self.retry_backoff_seconds,
+            backoff_multiplier=2.0,
+            max_delay_seconds=self.max_retry_after_seconds,
+        )
 
 
 @dataclass(frozen=True)
@@ -138,9 +165,9 @@ class DownloadCancelledError(RuntimeError):
 
 
 class _AttemptError(RuntimeError):
-    def __init__(self, message: str, *, retryable: bool) -> None:
-        super().__init__(message)
-        self.retryable = retryable
+    def __init__(self, error: AppError) -> None:
+        self.error = error
+        super().__init__(error.user_message)
 
 
 class ImageDownloader:
@@ -216,7 +243,8 @@ class ImageDownloader:
 
         error_message = "Không thể tải ảnh."
         attempts = 0
-        for attempt in range(1, self.config.max_attempts + 1):
+        retry_policy = self.config.retry_policy
+        for attempt in range(1, retry_policy.max_attempts + 1):
             attempts = attempt
             self._raise_if_cancelled(cancel_check)
             try:
@@ -232,16 +260,24 @@ class ImageDownloader:
                 self._remove_leftover_parts(folder, stem)
                 raise
             except _AttemptError as exc:
-                error_message = str(exc)
+                error_message = exc.error.user_message
                 self._remove_leftover_parts(folder, stem)
-                if not exc.retryable or attempt >= self.config.max_attempts:
+                if exc.error.error_code in {"DISK_FULL", "PERMISSION_DENIED"}:
+                    raise AppErrorException(exc.error) from exc
+                if not retry_policy.should_retry(exc.error, attempt):
                     break
-                backoff = self.config.retry_backoff_seconds * attempt
+                backoff = retry_policy.get_delay(attempt, exc.error)
                 logger.warning(
-                    "Thử lại ảnh %d/%d sau lỗi tạm thời: %s",
+                    "Thử lại ảnh %d/%d: code=%s stage=%s attempt=%d/%d "
+                    "delay=%.3fs technical=%s",
                     index,
                     total,
-                    error_message,
+                    exc.error.error_code,
+                    exc.error.stage.value,
+                    attempt,
+                    retry_policy.max_attempts,
+                    backoff,
+                    exc.error.technical_message,
                 )
                 self._raise_if_cancelled(cancel_check)
                 self._sleep(backoff)
@@ -282,25 +318,51 @@ class ImageDownloader:
                 timeout=self.config.socket_timeout_seconds,
             )
         except HTTPError as exc:
+            retry_after = self._retry_after_from_headers(exc.headers)
             raise _AttemptError(
-                f"HTTP {exc.code}",
-                retryable=exc.code == 429 or 500 <= exc.code <= 599,
+                error_from_http_status(
+                    exc.code,
+                    technical_message=f"HTTPError: {exc}",
+                    retry_after_seconds=retry_after,
+                )
             ) from exc
         except (TimeoutError, socket.timeout) as exc:
-            raise _AttemptError("Hết thời gian tải ảnh.", retryable=True) from exc
+            raise _AttemptError(
+                classify_error_code(
+                    "NETWORK_TIMEOUT",
+                    stage=ErrorStage.DOWNLOAD,
+                    technical_message=f"{type(exc).__name__}: {exc}",
+                )
+            ) from exc
         except URLError as exc:
-            message = (
-                "Hết thời gian tải ảnh."
+            code = (
+                "NETWORK_TIMEOUT"
                 if isinstance(exc.reason, (TimeoutError, socket.timeout))
-                else "Không thể kết nối máy chủ ảnh."
+                else "CONNECTION_RESET"
             )
-            raise _AttemptError(message, retryable=True) from exc
+            raise _AttemptError(
+                classify_error_code(
+                    code,
+                    stage=ErrorStage.DOWNLOAD,
+                    technical_message=f"URLError: {exc}",
+                )
+            ) from exc
         except (ConnectionError, OSError) as exc:
             raise _AttemptError(
-                "Không thể kết nối máy chủ ảnh.", retryable=True
+                error_from_exception(
+                    exc,
+                    stage=ErrorStage.DOWNLOAD,
+                    default_code="CONNECTION_RESET",
+                )
             ) from exc
         except (TypeError, ValueError) as exc:
-            raise _AttemptError("URL ảnh không hợp lệ.", retryable=False) from exc
+            raise _AttemptError(
+                classify_error_code(
+                    "INVALID_URL",
+                    stage=ErrorStage.DOWNLOAD,
+                    technical_message=f"{type(exc).__name__}: {exc}",
+                )
+            ) from exc
 
         try:
             with response:
@@ -319,9 +381,21 @@ class ImageDownloader:
         except DownloadCancelledError:
             raise
         except (TimeoutError, socket.timeout) as exc:
-            raise _AttemptError("Hết thời gian tải ảnh.", retryable=True) from exc
+            raise _AttemptError(
+                classify_error_code(
+                    "NETWORK_TIMEOUT",
+                    stage=ErrorStage.DOWNLOAD,
+                    technical_message=f"{type(exc).__name__}: {exc}",
+                )
+            ) from exc
         except (ConnectionError, OSError) as exc:
-            raise _AttemptError("Kết nối tải ảnh bị gián đoạn.", retryable=True) from exc
+            raise _AttemptError(
+                error_from_exception(
+                    exc,
+                    stage=ErrorStage.DOWNLOAD,
+                    default_code="CONNECTION_RESET",
+                )
+            ) from exc
 
     def _consume_response(
         self,
@@ -340,10 +414,23 @@ class ImageDownloader:
             status_code = response.getcode()
         if not isinstance(status_code, int) or not 200 <= status_code <= 299:
             code = status_code if isinstance(status_code, int) else "không xác định"
-            retryable = status_code == 429 or (
-                isinstance(status_code, int) and 500 <= status_code <= 599
+            retry_after = self._retry_after_from_headers(
+                getattr(response, "headers", None)
             )
-            raise _AttemptError(f"HTTP {code}", retryable=retryable)
+            if isinstance(status_code, int):
+                raise _AttemptError(
+                    error_from_http_status(
+                        status_code,
+                        retry_after_seconds=retry_after,
+                    )
+                )
+            raise _AttemptError(
+                classify_error_code(
+                    "UNSUPPORTED_RESPONSE",
+                    stage=ErrorStage.DOWNLOAD,
+                    technical_message=f"HTTP status is not an integer: {code}",
+                )
+            )
 
         raw_content_type = ""
         headers = getattr(response, "headers", None)
@@ -353,16 +440,33 @@ class ImageDownloader:
         mime_extension = _MIME_EXTENSIONS.get(mime_type)
         if mime_extension is None and mime_type not in _AMBIGUOUS_MIME_TYPES:
             raise _AttemptError(
-                f"Phản hồi không phải ảnh ({mime_type or 'không rõ'}).",
-                retryable=False,
+                classify_error_code(
+                    "UNSUPPORTED_RESPONSE",
+                    stage=ErrorStage.DOWNLOAD,
+                    technical_message=(
+                        f"Unsupported image Content-Type: {mime_type or 'unknown'}"
+                    ),
+                )
             )
 
         self._raise_if_cancelled(cancel_check)
         first_chunk = self._read_chunk(response, started_at)
         if not first_chunk:
-            raise _AttemptError("Phản hồi ảnh rỗng.", retryable=False)
+            raise _AttemptError(
+                classify_error_code(
+                    "EMPTY_IMAGE_RESPONSE",
+                    stage=ErrorStage.DOWNLOAD,
+                    technical_message="Image response body was empty",
+                )
+            )
         if self._looks_like_non_image(first_chunk):
-            raise _AttemptError("Phản hồi chứa HTML hoặc JSON, không phải ảnh.", retryable=False)
+            raise _AttemptError(
+                classify_error_code(
+                    "NON_IMAGE_RESPONSE",
+                    stage=ErrorStage.DOWNLOAD,
+                    technical_message="Image response signature is HTML or JSON",
+                )
+            )
 
         extension = (
             mime_extension
@@ -407,11 +511,17 @@ class ImageDownloader:
                 )
             part_path.replace(target)
         except DownloadCancelledError:
-            part_path.unlink(missing_ok=True)
+            self._safe_unlink(part_path)
             raise
         except OSError as exc:
-            part_path.unlink(missing_ok=True)
-            raise _AttemptError("Không thể ghi tệp ảnh.", retryable=False) from exc
+            self._safe_unlink(part_path)
+            raise _AttemptError(
+                error_from_exception(
+                    exc,
+                    stage=ErrorStage.DOWNLOAD,
+                    default_code="IMAGE_DOWNLOAD_ERROR",
+                )
+            ) from exc
 
         return ImageDownloadResult(
             index=index,
@@ -423,35 +533,120 @@ class ImageDownloader:
 
     def _read_chunk(self, response: Any, started_at: float) -> bytes:
         if self._monotonic() - started_at >= self.config.overall_timeout_seconds:
-            raise _AttemptError("Hết thời gian tổng để tải ảnh.", retryable=True)
+            raise _AttemptError(
+                classify_error_code(
+                    "NETWORK_TIMEOUT",
+                    stage=ErrorStage.DOWNLOAD,
+                    technical_message="Overall image download deadline exceeded",
+                )
+            )
         try:
             chunk = response.read(self.config.chunk_size)
         except (TimeoutError, socket.timeout) as exc:
-            raise _AttemptError("Hết thời gian đọc ảnh.", retryable=True) from exc
+            raise _AttemptError(
+                classify_error_code(
+                    "NETWORK_TIMEOUT",
+                    stage=ErrorStage.DOWNLOAD,
+                    technical_message=f"{type(exc).__name__}: {exc}",
+                )
+            ) from exc
         except (ConnectionError, OSError) as exc:
-            raise _AttemptError("Kết nối tải ảnh bị gián đoạn.", retryable=True) from exc
+            raise _AttemptError(
+                error_from_exception(
+                    exc,
+                    stage=ErrorStage.DOWNLOAD,
+                    default_code="CONNECTION_RESET",
+                )
+            ) from exc
         if self._monotonic() - started_at >= self.config.overall_timeout_seconds:
-            raise _AttemptError("Hết thời gian tổng để tải ảnh.", retryable=True)
+            raise _AttemptError(
+                classify_error_code(
+                    "NETWORK_TIMEOUT",
+                    stage=ErrorStage.DOWNLOAD,
+                    technical_message="Overall image download deadline exceeded",
+                )
+            )
         if not isinstance(chunk, bytes):
-            raise _AttemptError("Phản hồi ảnh không hợp lệ.", retryable=False)
+            raise _AttemptError(
+                classify_error_code(
+                    "UNSUPPORTED_RESPONSE",
+                    stage=ErrorStage.DOWNLOAD,
+                    technical_message=(
+                        f"Response.read returned {type(chunk).__name__}, expected bytes"
+                    ),
+                )
+            )
         return chunk
+
+    def _retry_after_from_headers(self, headers: Any) -> float | None:
+        if headers is None:
+            return None
+        try:
+            raw_value = headers.get("Retry-After", "")
+        except (AttributeError, TypeError):
+            return None
+        return parse_retry_after(
+            raw_value,
+            maximum_seconds=self.config.max_retry_after_seconds,
+        )
 
     @staticmethod
     def _validated_product_folder(product_folder: str | Path) -> Path:
         try:
             folder = Path(product_folder).resolve(strict=True)
         except (OSError, RuntimeError, TypeError) as exc:
-            raise ValueError("Thư mục sản phẩm không tồn tại hoặc không khả dụng.") from exc
-        if not folder.is_dir():
-            raise ValueError("Đường dẫn thư mục sản phẩm không phải thư mục.")
+            raise AppErrorException(
+                error_from_exception(
+                    exc,
+                    stage=ErrorStage.DOWNLOAD,
+                    default_code="INVALID_OUTPUT_PATH",
+                )
+            ) from exc
+        try:
+            is_directory = folder.is_dir()
+        except OSError as exc:
+            raise AppErrorException(
+                error_from_exception(
+                    exc,
+                    stage=ErrorStage.DOWNLOAD,
+                    default_code="INVALID_OUTPUT_PATH",
+                )
+            ) from exc
+        if not is_directory:
+            raise AppErrorException(
+                classify_error_code(
+                    "INVALID_OUTPUT_PATH",
+                    stage=ErrorStage.DOWNLOAD,
+                    technical_message=(
+                        f"Product folder is not a directory: {folder}"
+                    ),
+                )
+            )
         return folder
 
     @staticmethod
     def _target_path(folder: Path, stem: str, extension: str) -> Path:
         target = folder / f"{stem}{extension}"
-        resolved_target = target.resolve(strict=False)
+        try:
+            resolved_target = target.resolve(strict=False)
+        except (OSError, RuntimeError) as exc:
+            raise AppErrorException(
+                error_from_exception(
+                    exc,
+                    stage=ErrorStage.DOWNLOAD,
+                    default_code="INVALID_OUTPUT_PATH",
+                )
+            ) from exc
         if resolved_target.parent != folder:
-            raise ValueError("Đường dẫn ảnh nằm ngoài thư mục sản phẩm.")
+            raise AppErrorException(
+                classify_error_code(
+                    "PATH_CONTAINMENT_VIOLATION",
+                    stage=ErrorStage.DOWNLOAD,
+                    technical_message=(
+                        f"Image target escapes product folder: {target}"
+                    ),
+                )
+            )
         return target
 
     @staticmethod
@@ -502,3 +697,10 @@ class ImageDownloader:
                 part_path.unlink(missing_ok=True)
             except OSError:
                 logger.warning("Không thể xóa tệp tải dở: %s", part_path)
+
+    @staticmethod
+    def _safe_unlink(path: Path) -> None:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("Không thể xóa tệp tải dở: %s", path)
