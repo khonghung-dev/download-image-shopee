@@ -36,20 +36,22 @@ from shopee_image_downloader.storage.settings import SettingsManager
 class SilentDownloadController(QObject):
     """No-network test double for a UI-only duplicate-row regression."""
 
+    folder_ready = Signal(object)
     progress = Signal(object, int, int)
     finished = Signal(object, object)
-    failed = Signal(object, str)
+    failed = Signal(object, str, str)
     cancelled = Signal(object)
+    idle = Signal()
 
     @property
     def is_busy(self) -> bool:
         return False
 
-    def start(self, product_data: BridgeProductData) -> bool:
+    def start(self, product_data: BridgeProductData, output_root: str) -> bool:
         return True
 
-    def cancel(self) -> None:
-        return
+    def cancel(self, request_id: str | None = None) -> bool:
+        return False
 
 
 class ChunkedBytesIO(io.BytesIO):

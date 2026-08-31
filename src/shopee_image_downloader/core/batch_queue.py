@@ -1,8 +1,8 @@
-"""Batch URL queue orchestration and state management for Shopee Image Downloader."""
+"""Deterministic batch orchestration for Shopee Image Downloader."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 import logging
 import uuid
@@ -13,35 +13,89 @@ from shopee_image_downloader.core.bridge_protocol import BridgeProductData
 
 logger = logging.getLogger(__name__)
 
-# Default timeout per queue item (in milliseconds)
 DEFAULT_ITEM_TIMEOUT_MS: int = 35000
 
 
 class QueueState(str, Enum):
-    """Overall state of the batch queue manager."""
+    """Overall state of the single active batch execution."""
 
     IDLE = "IDLE"
     RUNNING = "RUNNING"
     PAUSED_VERIFICATION = "PAUSED_VERIFICATION"
+    CANCELLING = "CANCELLING"
     COMPLETED = "COMPLETED"
+    CANCELLED = "CANCELLED"
 
 
 class ItemState(str, Enum):
-    """Lifecycle state of an individual item in the queue."""
+    """Lifecycle state of one immutable queue input."""
 
     PENDING = "PENDING"
-    NAVIGATING = "NAVIGATING"
-    SCANNING = "SCANNING"
+    OPENING_PRODUCT = "OPENING_PRODUCT"
+    WAITING_EXTRACTION = "WAITING_EXTRACTION"
+    CREATING_FOLDER = "CREATING_FOLDER"
     DOWNLOADING = "DOWNLOADING"
     SUCCESS = "SUCCESS"
     COMPLETED_WITH_ERRORS = "COMPLETED_WITH_ERRORS"
     FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
 
 
-# User-facing status labels
+TERMINAL_ITEM_STATES: frozenset[ItemState] = frozenset(
+    {
+        ItemState.SUCCESS,
+        ItemState.COMPLETED_WITH_ERRORS,
+        ItemState.FAILED,
+        ItemState.CANCELLED,
+    }
+)
+
+_ALLOWED_ITEM_TRANSITIONS: dict[ItemState, frozenset[ItemState]] = {
+    ItemState.PENDING: frozenset(
+        {ItemState.OPENING_PRODUCT, ItemState.CANCELLED}
+    ),
+    ItemState.OPENING_PRODUCT: frozenset(
+        {
+            ItemState.WAITING_EXTRACTION,
+            ItemState.CREATING_FOLDER,
+            ItemState.FAILED,
+            ItemState.CANCELLED,
+        }
+    ),
+    ItemState.WAITING_EXTRACTION: frozenset(
+        {
+            ItemState.OPENING_PRODUCT,
+            ItemState.CREATING_FOLDER,
+            ItemState.FAILED,
+            ItemState.CANCELLED,
+        }
+    ),
+    ItemState.CREATING_FOLDER: frozenset(
+        {
+            ItemState.DOWNLOADING,
+            ItemState.FAILED,
+            ItemState.CANCELLED,
+        }
+    ),
+    ItemState.DOWNLOADING: frozenset(
+        {
+            ItemState.SUCCESS,
+            ItemState.COMPLETED_WITH_ERRORS,
+            ItemState.FAILED,
+            ItemState.CANCELLED,
+        }
+    ),
+    ItemState.SUCCESS: frozenset(),
+    ItemState.COMPLETED_WITH_ERRORS: frozenset(),
+    ItemState.FAILED: frozenset(),
+    ItemState.CANCELLED: frozenset(),
+}
+
+
 STATUS_DISPLAY_NAVIGATING: str = "Đang mở sản phẩm"
 STATUS_DISPLAY_WAITING: str = "Đang chờ Shopee tải"
 STATUS_DISPLAY_SCANNING: str = "Đang quét toàn bộ ảnh"
+STATUS_DISPLAY_CREATING_FOLDER: str = "Đang tạo thư mục"
 STATUS_DISPLAY_DOWNLOADING: str = "Đang tải ảnh"
 STATUS_DISPLAY_SUCCESS: str = "Đã tải ảnh"
 STATUS_DISPLAY_VERIFICATION: str = "Shopee yêu cầu xác minh"
@@ -52,11 +106,11 @@ STATUS_DISPLAY_CANCELLED: str = "Đã hủy"
 
 @dataclass
 class QueueItem:
-    """Represents a single queued URL item."""
+    """One queued input with stable identity and mutable lifecycle fields."""
 
     request_id: str
     row_idx: int
-    url: str
+    input_url: str
     state: ItemState = ItemState.PENDING
     stage: str = ""
     product_data: BridgeProductData | None = None
@@ -64,34 +118,31 @@ class QueueItem:
     error_message: str | None = None
 
     @property
+    def url(self) -> str:
+        """Compatibility alias for the stable original input URL."""
+        return self.input_url
+
+    @property
     def is_finished(self) -> bool:
-        """Return True if the item has reached any terminal state."""
-        return self.state in (
-            ItemState.SUCCESS,
-            ItemState.COMPLETED_WITH_ERRORS,
-            ItemState.FAILED,
-        )
+        """Return whether this item is in a terminal state."""
+        return self.state in TERMINAL_ITEM_STATES
 
 
 class BatchQueueManager(QObject):
-    """Authoritative owner of the batch URL queue.
+    """Authoritative owner of one strictly sequential product queue."""
 
-    Sequences URLs one at a time to the Chrome Extension via the Native Messaging bridge,
-    correlates results by request_id, tracks progress, detects Shopee verification,
-    and supports pause/resume and cancellation.
-    """
-
-    state_changed = Signal(str)  # Emits new QueueState value
-    item_started = Signal(int, str, str)  # (row_idx, url, request_id)
-    item_progress = Signal(int, str, str)  # (row_idx, stage, display_text)
-    item_download_requested = Signal(int, object)  # (row_idx, BridgeProductData)
-    item_completed = Signal(int, object)  # (row_idx, BridgeProductData)
-    item_failed = Signal(int, str, str)  # (row_idx, error_code, error_message)
-    verification_required = Signal(int, str, str)  # (row_idx, url, message)
-    progress_updated = Signal(int, int)  # (finished_count, total_count)
-    batch_finished = Signal(int, int, list)  # (success_count, fail_count, items)
-    send_open_product_requested = Signal(str, str)  # (request_id, url)
-    send_cancel_requested = Signal(str)  # (request_id)
+    state_changed = Signal(str)
+    item_started = Signal(int, str, str)  # row, input_url, request_id
+    item_progress = Signal(int, str, str)  # row, stage, display text
+    item_download_requested = Signal(int, object)  # row, extracted product
+    item_completed = Signal(int, object)  # row, completed product
+    item_failed = Signal(int, str, str)  # row, error code, message
+    verification_required = Signal(int, str, str)
+    progress_updated = Signal(int, int)  # finalized, total
+    batch_finished = Signal(int, int, list)  # success, failed, item snapshot
+    send_open_product_requested = Signal(str, str)
+    send_cancel_requested = Signal(str)
+    cancel_download_requested = Signal(str)
 
     def __init__(
         self,
@@ -100,9 +151,10 @@ class BatchQueueManager(QObject):
     ) -> None:
         super().__init__(parent)
         self.item_timeout_ms = item_timeout_ms
-        self._state: QueueState = QueueState.IDLE
+        self._state = QueueState.IDLE
         self._items: list[QueueItem] = []
-        self._current_index: int = -1
+        self._current_index = -1
+        self._known_request_ids: set[str] = set()
 
         self._timeout_timer = QTimer(self)
         self._timeout_timer.setSingleShot(True)
@@ -110,232 +162,412 @@ class BatchQueueManager(QObject):
 
     @property
     def state(self) -> QueueState:
-        """Return current overall queue state."""
+        """Return the overall queue state."""
         return self._state
 
     @property
     def is_running(self) -> bool:
-        """Return whether queue is actively running."""
+        """Return whether normal processing callbacks may advance the queue."""
         return self._state == QueueState.RUNNING
 
     @property
+    def is_active(self) -> bool:
+        """Return whether a batch owns the UI, including pause/cancellation."""
+        return self._state in {
+            QueueState.RUNNING,
+            QueueState.PAUSED_VERIFICATION,
+            QueueState.CANCELLING,
+        }
+
+    @property
     def is_paused_for_verification(self) -> bool:
-        """Return whether queue is paused waiting for user verification."""
+        """Return whether the current product awaits user verification."""
         return self._state == QueueState.PAUSED_VERIFICATION
 
     @property
     def total_count(self) -> int:
-        """Return total number of items in queue."""
+        """Return the stable number of queued inputs."""
         return len(self._items)
 
     @property
+    def items(self) -> tuple[QueueItem, ...]:
+        """Return an immutable view of the ordered queue container."""
+        return tuple(self._items)
+
+    @property
     def current_item(self) -> QueueItem | None:
-        """Return the item currently being processed, or None."""
+        """Return the one current item, if an index is active."""
         if 0 <= self._current_index < len(self._items):
             return self._items[self._current_index]
         return None
 
+    def is_known_request(self, request_id: str | None) -> bool:
+        """Return whether a request ID was issued by this manager this session."""
+        return bool(request_id and request_id in self._known_request_ids)
+
     def get_finished_count(self) -> int:
-        """Return number of items that have completed (SUCCESS or FAILED)."""
-        return sum(1 for item in self._items if item.is_finished)
+        """Return the number of finalized queue items."""
+        return sum(item.is_finished for item in self._items)
 
     def get_success_count(self) -> int:
-        """Return products whose download phase reached a terminal result."""
+        """Return products that completed the image loop under 007B semantics."""
         return sum(
-            1
+            item.state in {ItemState.SUCCESS, ItemState.COMPLETED_WITH_ERRORS}
             for item in self._items
-            if item.state in (ItemState.SUCCESS, ItemState.COMPLETED_WITH_ERRORS)
         )
 
     def get_fail_count(self) -> int:
-        """Return number of failed items."""
-        return sum(1 for item in self._items if item.state == ItemState.FAILED)
+        """Return product-level failures, excluding cancellation."""
+        return sum(item.state == ItemState.FAILED for item in self._items)
+
+    def get_cancelled_count(self) -> int:
+        """Return cancelled current and pending items."""
+        return sum(item.state == ItemState.CANCELLED for item in self._items)
 
     def _set_state(self, new_state: QueueState) -> None:
-        """Set new queue state and emit signal if changed."""
-        if self._state != new_state:
-            self._state = new_state
-            logger.info(f"BatchQueueManager state -> {new_state.value}")
-            self.state_changed.emit(new_state.value)
+        if self._state == new_state:
+            return
+        self._state = new_state
+        logger.info("BatchQueueManager state -> %s", new_state.value)
+        self.state_changed.emit(new_state.value)
+
+    @staticmethod
+    def _transition_item(item: QueueItem, new_state: ItemState) -> bool:
+        """Apply one validated item transition or log and reject it."""
+        if new_state == item.state:
+            return True
+        if new_state not in _ALLOWED_ITEM_TRANSITIONS[item.state]:
+            logger.warning(
+                "Bỏ qua chuyển trạng thái không hợp lệ cho %s: %s -> %s",
+                item.request_id,
+                item.state.value,
+                new_state.value,
+            )
+            return False
+        item.state = new_state
+        return True
 
     def start_batch(self, valid_items: list[tuple[int, str]]) -> bool:
-        """Initialize and start a sequential batch with given (row_idx, url) pairs.
-
-        Returns False if a batch is already in progress.
-        """
-        if self._state in (QueueState.RUNNING, QueueState.PAUSED_VERIFICATION):
+        """Create and start one ordered queue from a snapshot of valid inputs."""
+        if self.is_active:
             logger.warning("Không thể bắt đầu batch mới khi batch cũ đang chạy")
             return False
 
-        if not valid_items:
+        input_snapshot = tuple(valid_items)
+        if not input_snapshot:
             logger.warning("Danh sách items rỗng")
             return False
 
-        self._items.clear()
-
-        for row_idx, url in valid_items:
-            req_id = f"req-{uuid.uuid4().hex[:12]}"
-            item = QueueItem(
-                request_id=req_id,
-                row_idx=row_idx,
-                url=url,
-                state=ItemState.PENDING,
+        new_items: list[QueueItem] = []
+        for row_idx, input_url in input_snapshot:
+            request_id = f"req-{uuid.uuid4().hex[:12]}"
+            new_items.append(
+                QueueItem(
+                    request_id=request_id,
+                    row_idx=row_idx,
+                    input_url=str(input_url),
+                )
             )
-            self._items.append(item)
+            self._known_request_ids.add(request_id)
 
+        self._items = new_items
         self._current_index = 0
         self._set_state(QueueState.RUNNING)
         self.progress_updated.emit(0, len(self._items))
         self._process_current_item()
         return True
 
-    def _process_current_item(self) -> None:
-        """Dispatch the current item to the Chrome Extension and start safety timeout."""
+    def _process_current_item(self, *, verification_resume: bool = False) -> None:
+        """Dispatch current once, except an explicit verification resume."""
+        if self._state != QueueState.RUNNING:
+            return
         item = self.current_item
-        if not item:
+        if item is None:
             self._finish_batch()
             return
 
-        item.state = ItemState.NAVIGATING
-        item.stage = "navigating"
-        logger.info(f"Bắt đầu xử lý item [{self._current_index + 1}/{len(self._items)}]: row={item.row_idx}, req={item.request_id}")
+        if verification_resume:
+            if item.state != ItemState.WAITING_EXTRACTION:
+                logger.warning(
+                    "Không thể gửi lại %s từ trạng thái %s",
+                    item.request_id,
+                    item.state.value,
+                )
+                return
+        elif item.state != ItemState.PENDING:
+            logger.warning(
+                "Bỏ qua dispatch lặp lại cho %s ở trạng thái %s",
+                item.request_id,
+                item.state.value,
+            )
+            return
 
-        self.item_started.emit(item.row_idx, item.url, item.request_id)
-        self.item_progress.emit(item.row_idx, "navigating", STATUS_DISPLAY_NAVIGATING)
-        self.send_open_product_requested.emit(item.request_id, item.url)
-
+        if not self._transition_item(item, ItemState.OPENING_PRODUCT):
+            return
+        item.stage = "opening_product"
+        item.error_code = None
+        item.error_message = None
+        logger.info(
+            "Bắt đầu sản phẩm [%d/%d]: row=%d, req=%s",
+            self._current_index + 1,
+            len(self._items),
+            item.row_idx,
+            item.request_id,
+        )
+        self.item_started.emit(item.row_idx, item.input_url, item.request_id)
+        self.item_progress.emit(
+            item.row_idx,
+            item.stage,
+            STATUS_DISPLAY_NAVIGATING,
+        )
+        self.send_open_product_requested.emit(item.request_id, item.input_url)
         if self.item_timeout_ms > 0:
             self._timeout_timer.start(self.item_timeout_ms)
 
     def handle_process_progress(self, request_id: str, stage: str) -> None:
-        """Handle progress notification from Chrome Extension."""
+        """Accept correlated extraction progress without allowing regression."""
         if self._state != QueueState.RUNNING:
             return
-
         item = self.current_item
-        if not item or item.request_id != request_id:
-            logger.debug(f"Bỏ qua process_progress cho request_id không khớp: {request_id} (hiện tại: {item.request_id if item else None})")
+        if item is None or item.request_id != request_id:
+            logger.debug("Bỏ qua process_progress cũ/lệch: %s", request_id)
+            return
+        if item.state not in {
+            ItemState.OPENING_PRODUCT,
+            ItemState.WAITING_EXTRACTION,
+        }:
+            logger.debug(
+                "Bỏ qua process_progress %s trong trạng thái %s",
+                request_id,
+                item.state.value,
+            )
             return
 
-        if item.state == ItemState.DOWNLOADING:
-            return
-
-        item.stage = stage
-        display_text = STATUS_DISPLAY_NAVIGATING
+        display_text = STATUS_DISPLAY_WAITING
+        normalized_stage = stage
         if stage == "navigating":
-            item.state = ItemState.NAVIGATING
+            if item.state == ItemState.WAITING_EXTRACTION:
+                logger.debug("Bỏ qua acknowledgement navigating đến muộn")
+                return
             display_text = STATUS_DISPLAY_NAVIGATING
         elif stage == "waiting_page":
-            item.state = ItemState.NAVIGATING
             display_text = STATUS_DISPLAY_WAITING
+            self._transition_item(item, ItemState.WAITING_EXTRACTION)
         elif stage == "scanning_gallery":
-            item.state = ItemState.SCANNING
             display_text = STATUS_DISPLAY_SCANNING
+            self._transition_item(item, ItemState.WAITING_EXTRACTION)
         elif stage == "complete":
-            display_text = STATUS_DISPLAY_SUCCESS
+            normalized_stage = "waiting_result"
+            display_text = STATUS_DISPLAY_WAITING
+            self._transition_item(item, ItemState.WAITING_EXTRACTION)
 
-        self.item_progress.emit(item.row_idx, stage, display_text)
+        item.stage = normalized_stage
+        self.item_progress.emit(item.row_idx, normalized_stage, display_text)
 
     def handle_product_result(self, product_data: BridgeProductData) -> None:
-        """Accept extraction data and request background image downloading."""
+        """Accept one correlated extraction result and request its worker pipeline."""
         if self._state != QueueState.RUNNING:
             return
-
         item = self.current_item
-        if not item:
+        if item is None or product_data.request_id != item.request_id:
+            logger.warning(
+                "Bỏ qua product_result cũ/thiếu request_id: %s (hiện tại: %s)",
+                product_data.request_id,
+                item.request_id if item else None,
+            )
             return
-
-        # Correlate with request_id if available
-        if product_data.request_id and product_data.request_id != item.request_id:
-            logger.warning(f"Bỏ qua product_result với request_id cũ/lệch: {product_data.request_id} (hiện tại: {item.request_id})")
+        if item.state not in {
+            ItemState.OPENING_PRODUCT,
+            ItemState.WAITING_EXTRACTION,
+        }:
+            logger.debug(
+                "Bỏ qua product_result lặp lại cho %s ở trạng thái %s",
+                item.request_id,
+                item.state.value,
+            )
             return
-
-        if item.state == ItemState.DOWNLOADING:
-            logger.debug("Bỏ qua product_result lặp lại cho %s", item.request_id)
-            return
-
-        # Integrity Check: len(product_data.images) must match product_data.image_count if declared
-        if product_data.image_count is not None and product_data.image_count != len(product_data.images):
+        if (
+            product_data.image_count is not None
+            and product_data.image_count != len(product_data.images)
+        ):
             logger.error(
-                f"Lỗi toàn vẹn dữ liệu ảnh: image_count={product_data.image_count} != len(images)={len(product_data.images)}"
+                "Lỗi toàn vẹn ảnh cho %s: image_count=%s, images=%d",
+                item.request_id,
+                product_data.image_count,
+                len(product_data.images),
             )
             self.handle_process_error(
-                request_id=item.request_id,
-                url=item.url,
-                error_code="PROTOCOL_INTEGRITY_ERROR",
-                message="Lỗi đồng bộ dữ liệu ảnh",
+                item.request_id,
+                item.input_url,
+                "PROTOCOL_INTEGRITY_ERROR",
+                "Lỗi đồng bộ dữ liệu ảnh",
             )
             return
 
         self._timeout_timer.stop()
+        if not self._transition_item(item, ItemState.CREATING_FOLDER):
+            return
 
-        item.state = ItemState.DOWNLOADING
-        item.stage = "downloading"
-        item.product_data = product_data
-
+        product_snapshot = replace(
+            product_data,
+            images=list(product_data.images),
+            product_folder=None,
+            download_result=None,
+        )
+        item.stage = "creating_folder"
+        item.product_data = product_snapshot
         logger.info(
-            "[DESKTOP MODEL]\nproduct_key=%s\nstored_images=%d\ndisplayed_count=%d",
-            product_data.product_key,
-            len(product_data.images),
-            len(product_data.images),
+            "Nhận model req=%s, product=%s, images=%d",
+            item.request_id,
+            product_snapshot.product_key,
+            len(product_snapshot.images),
         )
         self.item_progress.emit(
             item.row_idx,
-            "downloading",
-            STATUS_DISPLAY_DOWNLOADING,
+            item.stage,
+            STATUS_DISPLAY_CREATING_FOLDER,
         )
-        self.item_download_requested.emit(item.row_idx, product_data)
+        self.item_download_requested.emit(item.row_idx, product_snapshot)
 
-    def handle_download_result(self, product_data: BridgeProductData) -> None:
-        """Finish the current item only after its image download loop completes."""
+    def handle_product_folder_ready(self, product_data: BridgeProductData) -> None:
+        """Enter downloading after the worker creates the correlated folder."""
         if self._state != QueueState.RUNNING:
             return
-
         item = self.current_item
-        if not item or item.state != ItemState.DOWNLOADING:
+        if not self._matches_product(item, product_data, require_folder=False):
+            logger.warning("Bỏ qua folder_ready cũ/lệch")
             return
-        if product_data.request_id and product_data.request_id != item.request_id:
-            logger.warning(
-                "Bỏ qua kết quả tải ảnh với request_id cũ/lệch: %s",
-                product_data.request_id,
+        if item is None or item.state != ItemState.CREATING_FOLDER:
+            return
+        if product_data.product_folder is None:
+            self.handle_pipeline_failure(
+                product_data,
+                "PRODUCT_FOLDER_ERROR",
+                "Không thể tạo thư mục sản phẩm.",
             )
             return
+        if not self._transition_item(item, ItemState.DOWNLOADING):
+            return
 
-        download_result = product_data.download_result
-        if download_result is None or download_result.total != len(product_data.images):
-            self.handle_download_failure(
+        item.stage = "downloading"
+        item.product_data = replace(
+            product_data,
+            images=list(product_data.images),
+            download_result=None,
+        )
+        self.item_progress.emit(
+            item.row_idx,
+            item.stage,
+            f"{STATUS_DISPLAY_DOWNLOADING} 0/{len(product_data.images)}",
+        )
+
+    def handle_download_progress(
+        self,
+        product_data: BridgeProductData,
+        completed: int,
+        total: int,
+    ) -> None:
+        """Accept progress only for the owned request, product, and folder."""
+        if self._state != QueueState.RUNNING:
+            return
+        item = self.current_item
+        if (
+            item is None
+            or item.state != ItemState.DOWNLOADING
+            or not self._matches_product(item, product_data, require_folder=True)
+        ):
+            logger.debug("Bỏ qua tiến độ tải ảnh cũ/lệch")
+            return
+        expected_total = len(item.product_data.images) if item.product_data else -1
+        if total != expected_total or completed < 0 or completed > total:
+            logger.warning(
+                "Bỏ qua tiến độ tải ảnh không hợp lệ cho %s: %d/%d",
                 item.request_id,
+                completed,
+                total,
+            )
+            return
+        self.item_progress.emit(
+            item.row_idx,
+            "downloading",
+            f"{STATUS_DISPLAY_DOWNLOADING} {completed}/{total}",
+        )
+
+    def handle_download_result(self, product_data: BridgeProductData) -> None:
+        """Finalize only after the correlated worker is fully cleaned."""
+        if self._state != QueueState.RUNNING:
+            return
+        item = self.current_item
+        if (
+            item is None
+            or item.state != ItemState.DOWNLOADING
+            or not self._matches_product(item, product_data, require_folder=True)
+        ):
+            logger.warning("Bỏ qua kết quả tải ảnh cũ/lệch")
+            return
+
+        result = product_data.download_result
+        if not self._download_result_matches_product(product_data):
+            self.handle_pipeline_failure(
+                product_data,
+                "IMAGE_DOWNLOAD_ERROR",
                 "Kết quả tải ảnh không đầy đủ.",
             )
             return
 
-        item.state = (
+        new_state = (
             ItemState.COMPLETED_WITH_ERRORS
-            if download_result.failed
+            if result.failed
             else ItemState.SUCCESS
         )
+        if not self._transition_item(item, new_state):
+            return
         item.stage = "complete"
-        item.product_data = product_data
-
-        self.item_completed.emit(item.row_idx, product_data)
+        item.product_data = replace(
+            product_data,
+            images=list(product_data.images),
+        )
+        self.item_completed.emit(item.row_idx, item.product_data)
         self.progress_updated.emit(self.get_finished_count(), len(self._items))
-        self._advance_queue()
+        self._advance_queue(item.request_id)
 
-    def handle_download_failure(self, request_id: str, message: str) -> None:
-        """Mark an unexpected product-level downloader failure and continue."""
+    def handle_pipeline_failure(
+        self,
+        product_data: BridgeProductData,
+        error_code: str,
+        message: str,
+    ) -> None:
+        """Finalize a correlated folder/downloader failure and continue."""
         if self._state != QueueState.RUNNING:
             return
         item = self.current_item
-        if not item or item.request_id != request_id:
+        if (
+            item is None
+            or item.state not in {
+                ItemState.CREATING_FOLDER,
+                ItemState.DOWNLOADING,
+            }
+            or not self._matches_product(
+                item,
+                product_data,
+                require_folder=item.state == ItemState.DOWNLOADING,
+            )
+        ):
+            logger.warning("Bỏ qua lỗi worker cũ/lệch: %s", error_code)
             return
+        self._fail_current_item(error_code, message)
 
-        item.state = ItemState.FAILED
-        item.error_code = "IMAGE_DOWNLOAD_ERROR"
-        item.error_message = message
-        self.item_failed.emit(item.row_idx, "IMAGE_DOWNLOAD_ERROR", message)
-        self.progress_updated.emit(self.get_finished_count(), len(self._items))
-
-        self._advance_queue()
+    def handle_download_failure(self, request_id: str, message: str) -> None:
+        """Handle a synchronous controller start failure."""
+        item = self.current_item
+        if (
+            self._state != QueueState.RUNNING
+            or item is None
+            or item.request_id != request_id
+            or item.state != ItemState.CREATING_FOLDER
+        ):
+            return
+        self._fail_current_item("IMAGE_DOWNLOAD_ERROR", message)
 
     def handle_process_error(
         self,
@@ -344,97 +576,168 @@ class BatchQueueManager(QObject):
         error_code: str,
         message: str,
     ) -> None:
-        """Handle process failure or verification challenge from Chrome Extension."""
+        """Handle one correlated extraction failure or verification challenge."""
+        if self._state not in {
+            QueueState.RUNNING,
+            QueueState.PAUSED_VERIFICATION,
+        }:
+            return
         item = self.current_item
-        if not item or item.request_id != request_id:
-            logger.debug(f"Bỏ qua process_error cho request_id không khớp: {request_id}")
+        if item is None or item.request_id != request_id:
+            logger.debug("Bỏ qua process_error cũ/lệch: %s", request_id)
+            return
+        if item.state not in {
+            ItemState.OPENING_PRODUCT,
+            ItemState.WAITING_EXTRACTION,
+        }:
+            logger.debug(
+                "Bỏ qua process_error trong trạng thái %s", item.state.value
+            )
             return
 
         self._timeout_timer.stop()
-
         if error_code == "VERIFICATION_REQUIRED":
-            logger.warning(f"Phát hiện yêu cầu xác minh tại item {item.row_idx + 1}")
+            if item.state == ItemState.OPENING_PRODUCT:
+                self._transition_item(item, ItemState.WAITING_EXTRACTION)
+            item.stage = "waiting_verification"
             item.error_code = error_code
             item.error_message = message or STATUS_DISPLAY_VERIFICATION
             self._set_state(QueueState.PAUSED_VERIFICATION)
-            self.verification_required.emit(item.row_idx, url, message or STATUS_DISPLAY_VERIFICATION)
+            self.verification_required.emit(
+                item.row_idx,
+                url,
+                item.error_message,
+            )
             return
 
-        # Standard error: mark as failed and continue batch
-        item.state = ItemState.FAILED
-        item.error_code = error_code
-        item.error_message = message or STATUS_DISPLAY_FAILED
-
-        logger.warning(f"Item {item.row_idx + 1} thất bại [{error_code}]: {message}")
-        self.item_failed.emit(item.row_idx, error_code, message or STATUS_DISPLAY_FAILED)
-        self.progress_updated.emit(self.get_finished_count(), len(self._items))
-
-        self._advance_queue()
+        self._fail_current_item(
+            error_code,
+            message or STATUS_DISPLAY_FAILED,
+        )
 
     def resume_verification(self) -> bool:
-        """Resume batch processing after user manually completes verification."""
+        """Explicitly redispatch the same request after verification."""
         if self._state != QueueState.PAUSED_VERIFICATION:
-            logger.warning("Không thể resume khi queue không ở trạng thái PAUSED_VERIFICATION")
             return False
-
         item = self.current_item
-        if not item:
-            self._finish_batch()
+        if item is None or item.state != ItemState.WAITING_EXTRACTION:
+            logger.warning("Không có item xác minh hợp lệ để tiếp tục")
             return False
-
-        logger.info(f"Tiếp tục xử lý lại item {item.row_idx + 1} sau xác minh...")
         self._set_state(QueueState.RUNNING)
-        self._process_current_item()
+        self._process_current_item(verification_resume=True)
         return True
 
-    def cancel_batch(self) -> None:
-        """Cancel ongoing batch execution and safely abandon in-flight item."""
-        if self._state not in (QueueState.RUNNING, QueueState.PAUSED_VERIFICATION):
-            return
+    def cancel_batch(self) -> bool:
+        """Begin deterministic cooperative cancellation of the active batch."""
+        if self._state not in {
+            QueueState.RUNNING,
+            QueueState.PAUSED_VERIFICATION,
+        }:
+            return False
 
         logger.info("Yêu cầu hủy batch từ người dùng")
         self._timeout_timer.stop()
-
+        self._set_state(QueueState.CANCELLING)
         item = self.current_item
-        if item and item.state in (
-            ItemState.PENDING,
-            ItemState.NAVIGATING,
-            ItemState.SCANNING,
-            ItemState.DOWNLOADING,
-        ):
-            item.state = ItemState.FAILED
-            item.error_code = "CANCELLED"
-            item.error_message = STATUS_DISPLAY_CANCELLED
-            self.item_failed.emit(item.row_idx, "CANCELLED", STATUS_DISPLAY_CANCELLED)
+
+        if item is not None and not item.is_finished:
             self.send_cancel_requested.emit(item.request_id)
 
-        self._set_state(QueueState.IDLE)
-        self.batch_finished.emit(self.get_success_count(), self.get_fail_count(), self._items)
+        for queued_item in self._items[self._current_index + 1 :]:
+            self._cancel_item(queued_item)
+
+        if item is None or item.is_finished:
+            self._finish_cancelled_batch()
+            return True
+
+        if item.state in {
+            ItemState.CREATING_FOLDER,
+            ItemState.DOWNLOADING,
+        }:
+            self.cancel_download_requested.emit(item.request_id)
+            return True
+
+        self._cancel_item(item)
+        self._finish_cancelled_batch()
+        return True
+
+    def handle_download_cancelled(self, product_data: BridgeProductData) -> None:
+        """Finish cancellation after the owned worker exits cleanly."""
+        if self._state != QueueState.CANCELLING:
+            return
+        item = self.current_item
+        if not self._matches_product(
+            item,
+            product_data,
+            require_folder=bool(
+                item
+                and item.product_data
+                and item.product_data.product_folder is not None
+            ),
+        ):
+            logger.warning("Bỏ qua callback hủy worker cũ/lệch")
+            return
+        if item is not None and not item.is_finished:
+            self._cancel_item(item)
+        self._finish_cancelled_batch()
+
+    def _fail_current_item(self, error_code: str, message: str) -> None:
+        item = self.current_item
+        if item is None or not self._transition_item(item, ItemState.FAILED):
+            return
+        item.stage = "failed"
+        item.error_code = error_code
+        item.error_message = message
+        logger.warning(
+            "Item %d thất bại [%s]: %s",
+            item.row_idx + 1,
+            error_code,
+            message,
+        )
+        self.item_failed.emit(item.row_idx, error_code, message)
+        self.progress_updated.emit(self.get_finished_count(), len(self._items))
+        self._advance_queue(item.request_id)
+
+    def _cancel_item(self, item: QueueItem) -> None:
+        if item.is_finished or not self._transition_item(item, ItemState.CANCELLED):
+            return
+        item.stage = "cancelled"
+        item.error_code = "CANCELLED"
+        item.error_message = STATUS_DISPLAY_CANCELLED
+        self.item_failed.emit(
+            item.row_idx,
+            item.error_code,
+            item.error_message,
+        )
 
     def _on_item_timeout(self) -> None:
-        """Handle bounded per-item safety timeout if extension stops responding."""
         if self._state != QueueState.RUNNING:
             return
-
         item = self.current_item
-        if not item:
+        if item is None or item.state not in {
+            ItemState.OPENING_PRODUCT,
+            ItemState.WAITING_EXTRACTION,
+        }:
             return
+        logger.warning(
+            "Hết thời gian xử lý (%dms) cho item %d",
+            self.item_timeout_ms,
+            item.row_idx + 1,
+        )
+        self._fail_current_item("TIMEOUT", STATUS_DISPLAY_TIMEOUT)
 
-        logger.warning(f"Hết thời gian xử lý ({self.item_timeout_ms}ms) cho item {item.row_idx + 1}")
-        item.state = ItemState.FAILED
-        item.error_code = "TIMEOUT"
-        item.error_message = STATUS_DISPLAY_TIMEOUT
-
-        self.item_failed.emit(item.row_idx, "TIMEOUT", STATUS_DISPLAY_TIMEOUT)
-        self.progress_updated.emit(self.get_finished_count(), len(self._items))
-
-        self._advance_queue()
-
-    def _advance_queue(self) -> None:
-        """Advance queue index and process next item or finish batch."""
+    def _advance_queue(self, finalized_request_id: str) -> None:
+        """Advance exactly once from the current terminal item."""
         if self._state != QueueState.RUNNING:
             return
-
+        item = self.current_item
+        if (
+            item is None
+            or item.request_id != finalized_request_id
+            or not item.is_finished
+        ):
+            logger.warning("Bỏ qua advance không hợp lệ: %s", finalized_request_id)
+            return
         self._current_index += 1
         if self._current_index < len(self._items):
             self._process_current_item()
@@ -442,12 +745,78 @@ class BatchQueueManager(QObject):
             self._finish_batch()
 
     def _finish_batch(self) -> None:
-        """Complete the batch, emit finished summary, and transition to IDLE."""
         self._timeout_timer.stop()
+        if self._state != QueueState.RUNNING:
+            return
         success_count = self.get_success_count()
         fail_count = self.get_fail_count()
-        logger.info(f"Hoàn tất batch: {success_count} thành công, {fail_count} thất bại trên tổng số {len(self._items)} items")
-
+        logger.info(
+            "Hoàn tất batch: %d thành công, %d thất bại, %d đã hủy / %d",
+            success_count,
+            fail_count,
+            self.get_cancelled_count(),
+            len(self._items),
+        )
         self._set_state(QueueState.COMPLETED)
-        self.batch_finished.emit(success_count, fail_count, list(self._items))
+        self.batch_finished.emit(
+            success_count,
+            fail_count,
+            list(self._items),
+        )
         self._set_state(QueueState.IDLE)
+
+    def _finish_cancelled_batch(self) -> None:
+        self._timeout_timer.stop()
+        if self._state != QueueState.CANCELLING:
+            return
+        self.progress_updated.emit(self.get_finished_count(), len(self._items))
+        self._set_state(QueueState.CANCELLED)
+        self.batch_finished.emit(
+            self.get_success_count(),
+            self.get_fail_count(),
+            list(self._items),
+        )
+        self._set_state(QueueState.IDLE)
+
+    @staticmethod
+    def _matches_product(
+        item: QueueItem | None,
+        product_data: BridgeProductData,
+        *,
+        require_folder: bool,
+    ) -> bool:
+        """Correlate request, identity, images, and optionally folder."""
+        if item is None or item.product_data is None:
+            return False
+        expected = item.product_data
+        if (
+            product_data.request_id != item.request_id
+            or product_data.product_key != expected.product_key
+            or product_data.product_name != expected.product_name
+            or list(product_data.images) != list(expected.images)
+        ):
+            return False
+        if require_folder:
+            return (
+                expected.product_folder is not None
+                and product_data.product_folder == expected.product_folder
+            )
+        return True
+
+    @staticmethod
+    def _download_result_matches_product(
+        product_data: BridgeProductData,
+    ) -> bool:
+        """Validate aggregate counters and ordered per-image ownership."""
+        result = product_data.download_result
+        if result is None or result.total != len(product_data.images):
+            return False
+        if result.successful + result.failed + result.skipped != result.total:
+            return False
+        if len(result.items) != result.total:
+            return False
+        return all(
+            image_result.index == index
+            and image_result.source_url == product_data.images[index - 1]
+            for index, image_result in enumerate(result.items, start=1)
+        )

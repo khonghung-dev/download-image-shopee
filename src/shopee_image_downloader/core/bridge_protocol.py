@@ -47,6 +47,10 @@ class BridgeProductData:
     product_folder: Path | None = None
     download_result: ProductDownloadResult | None = None
 
+    def __post_init__(self) -> None:
+        """Give every product model its own authoritative image list."""
+        object.__setattr__(self, "images", list(self.images))
+
     @property
     def product_key(self) -> str:
         """Return canonical deduplication key for this product listing."""

@@ -22,6 +22,13 @@ This file tracks the current architecture, not superseded implementation generat
 - [x] Sequential MIME-aware filenames, bounded timeout/retry, atomic `.part` commits, and existing-file preservation.
 - [x] Background `QThread` download integration; queue completion now waits for the current product's image result.
 - [x] Ordered per-image results and product totals stored on the existing desktop product model.
+- [x] Task 010: deterministic product lifecycle (`PENDING` → extraction → folder → download → terminal), with guarded transitions.
+- [x] Task 010: exactly one active product; the next URL starts only after the previous download worker exits and is cleaned.
+- [x] Task 010: strict request/product/folder correlation for extraction and download callbacks, including stale-event rejection.
+- [x] Task 010: terminal-item batch progress, separate per-image progress, and state-derived final summaries.
+- [x] Task 010: cooperative cancellation of current/pending items and deferred safe application close during active downloads.
+- [x] Task 010: worker-owned folder creation and network/file work, leaving the Qt GUI thread responsive.
+- [x] Task 010: 10-product, middle-failure, stale-result, double-start, cancellation, responsiveness, cleanup, shutdown, and isolation regressions.
 
 ## Frozen extraction regression
 
@@ -32,7 +39,10 @@ Tasks 007A/007B do not modify the extension, Native Host, gallery traversal, vid
 
 ## Planned product work
 
+- [ ] Task 011: generalized product retry/error UX and retrying failed batch items.
 - [ ] Task 012: replace the provisional folder collision suffix with full duplicate-product handling.
 - [ ] Package and verify the full desktop application distribution.
 
 Task 007A remains the sole owner of directory creation. Task 007B writes only controlled sequential image files inside that validated directory and does not implement broader duplicate-product policy.
+
+Task 010 does not change the Chrome Extension, Native Host, extraction protocol, gallery traversal, authoritative cache, Task 007B retry limits, or Task 012 duplicate-product policy.

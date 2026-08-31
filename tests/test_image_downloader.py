@@ -343,7 +343,7 @@ def test_controller_runs_downloader_outside_gui_thread(tmp_path: Path, qtbot) ->
     gui_thread_id = threading.get_ident()
 
     with qtbot.waitSignal(controller.finished, timeout=2000):
-        assert controller.start(product)
+        assert controller.start(product, str(tmp_path))
     qtbot.waitUntil(lambda: not controller.is_busy, timeout=2000)
 
     assert downloader.thread_id is not None

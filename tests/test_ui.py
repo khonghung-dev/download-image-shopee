@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -33,6 +34,10 @@ from shopee_image_downloader.core.image_downloader import (
     ProductDownloadResult,
 )
 from shopee_image_downloader.storage.settings import SettingsManager
+from shopee_image_downloader.storage.product_folder import (
+    ProductFolderError,
+    ensure_product_folder,
+)
 from shopee_image_downloader.ui.main_window import MainWindow
 from shopee_image_downloader.workers.bridge_worker import ExtensionBridgeServer
 
@@ -42,17 +47,35 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 class ImmediateImageDownloadController(QObject):
     """Deterministic UI-test double for the separately tested QThread controller."""
 
+    folder_ready = Signal(object)
     progress = Signal(object, int, int)
     finished = Signal(object, object)
-    failed = Signal(object, str)
+    failed = Signal(object, str, str)
     cancelled = Signal(object)
+    idle = Signal()
 
     @property
     def is_busy(self) -> bool:
         return False
 
-    def start(self, product_data: BridgeProductData) -> bool:
-        assert product_data.product_folder is not None
+    def start(self, product_data: BridgeProductData, output_root: str) -> bool:
+        try:
+            folder = ensure_product_folder(
+                output_root,
+                product_data.product_name,
+                product_data.shop_id,
+                product_data.item_id,
+            )
+        except ProductFolderError:
+            self.failed.emit(
+                product_data,
+                "PRODUCT_FOLDER_ERROR",
+                "Không thể tạo thư mục sản phẩm.",
+            )
+            self.idle.emit()
+            return True
+        product_data = replace(product_data, product_folder=folder)
+        self.folder_ready.emit(product_data)
         total = len(product_data.images)
         padding = max(2, len(str(total)))
         items: list[ImageDownloadResult] = []
@@ -73,19 +96,22 @@ class ImmediateImageDownloadController(QObject):
             product_data,
             ProductDownloadResult.from_items(total, items),
         )
+        self.idle.emit()
         return True
 
-    def cancel(self) -> None:
-        return
+    def cancel(self, request_id: str | None = None) -> bool:
+        return False
 
 
 class HoldingImageDownloadController(QObject):
     """Hold a product in DOWNLOADING until the test cancels it."""
 
+    folder_ready = Signal(object)
     progress = Signal(object, int, int)
     finished = Signal(object, object)
-    failed = Signal(object, str)
+    failed = Signal(object, str, str)
     cancelled = Signal(object)
+    idle = Signal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -96,12 +122,31 @@ class HoldingImageDownloadController(QObject):
     def is_busy(self) -> bool:
         return self.active_product is not None
 
-    def start(self, product_data: BridgeProductData) -> bool:
-        self.active_product = product_data
+    def start(self, product_data: BridgeProductData, output_root: str) -> bool:
+        folder = ensure_product_folder(
+            output_root,
+            product_data.product_name,
+            product_data.shop_id,
+            product_data.item_id,
+        )
+        self.active_product = replace(product_data, product_folder=folder)
+        self.folder_ready.emit(self.active_product)
         return True
 
-    def cancel(self) -> None:
+    def cancel(self, request_id: str | None = None) -> bool:
         self.cancel_calls += 1
+        if self.active_product is None:
+            return False
+        if (
+            request_id is not None
+            and request_id != self.active_product.request_id
+        ):
+            return False
+        product = self.active_product
+        self.active_product = None
+        self.cancelled.emit(product)
+        self.idle.emit()
+        return True
 
 
 def _create_window(
@@ -308,7 +353,7 @@ def test_main_window_batch_queue_ui_flow(tmp_path: Path, qtbot) -> None:
 
     assert window.results_table.item(0, 1).text() == "Sản phẩm 1"
     assert window.results_table.item(1, 1).text() == "Sản phẩm 2"
-    assert window.status_label.text() == "Hoàn tất: 2 thành công, 0 lỗi"
+    assert window.status_label.text() == "Hoàn tất 2/2: 2 thành công, 0 lỗi"
     assert window.progress_bar.value() == 100
     assert window.start_button.text() == "Bắt đầu tải ảnh"
     window.close()
@@ -431,7 +476,8 @@ def test_batch_preserves_authoritative_nine_image_result(tmp_path: Path) -> None
     stored = window._products_by_product_key["78513158:28469164720"]
     assert window.results_table.item(0, 3).text() == "9"
     assert len(stored.images) == 9
-    assert window.status_label.text() == "Đã tải 9/9 ảnh"
+    assert window.results_table.item(0, 2).text() == "Đã tải 9/9 ảnh"
+    assert window.status_label.text() == "Hoàn tất 1/1: 1 thành công, 0 lỗi"
     window.close()
 
 
@@ -510,7 +556,7 @@ def test_folder_failure_marks_batch_item_failed(tmp_path: Path) -> None:
     window._on_bridge_product_received(_product(request_id=request_id))
 
     assert window.results_table.item(0, 2).text() == "Không thể tạo thư mục sản phẩm."
-    assert window.status_label.text() == "Hoàn tất: 0 thành công, 1 lỗi"
+    assert window.status_label.text() == "Hoàn tất 1/1: 0 thành công, 1 lỗi"
     window.close()
 
 
@@ -542,5 +588,5 @@ def test_folder_failure_does_not_corrupt_next_queue_item(tmp_path: Path) -> None
     stored = window._products_by_product_key["1002:2002"]
     assert stored.product_folder is not None
     assert stored.product_folder.is_dir()
-    assert window.status_label.text() == "Hoàn tất: 1 thành công, 1 lỗi"
+    assert window.status_label.text() == "Hoàn tất 2/2: 1 thành công, 1 lỗi"
     window.close()

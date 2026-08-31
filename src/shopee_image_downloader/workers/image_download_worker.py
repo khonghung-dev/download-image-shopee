@@ -1,9 +1,9 @@
-"""Qt worker-thread boundary for product image downloads."""
+"""Worker-thread boundary for folder creation and product image downloads."""
 
 from __future__ import annotations
 
+from dataclasses import dataclass, replace
 import logging
-from pathlib import Path
 import threading
 
 from PySide6.QtCore import QObject, QThread, Signal, Slot
@@ -14,67 +14,143 @@ from shopee_image_downloader.core.image_downloader import (
     ImageDownloader,
     ProductDownloadResult,
 )
+from shopee_image_downloader.storage.product_folder import (
+    ProductFolderError,
+    ensure_product_folder,
+)
 
 logger = logging.getLogger(__name__)
 
 
-class ImageDownloadWorker(QObject):
-    """Run one product's sequential download loop outside the GUI thread."""
+@dataclass
+class _DownloadRunContext:
+    """Thread-shared outcome storage read only after QThread completion."""
 
-    progress = Signal(int, int)  # (completed image index, total)
-    finished = Signal(object)  # ProductDownloadResult
-    failed = Signal(str)
-    cancelled = Signal()
+    product: BridgeProductData
+    output_root: str
+    cancel_event: threading.Event
+    terminal_kind: str | None = None
+    result: ProductDownloadResult | None = None
+    error_code: str | None = None
+    error_message: str | None = None
+    folder_published: bool = False
+
+
+class ImageDownloadWorker(QObject):
+    """Create one product folder, then run its blocking image loop."""
+
+    folder_ready = Signal(object)
+    progress = Signal(object, int, int)
+    done = Signal()
 
     def __init__(
         self,
-        product_data: BridgeProductData,
+        context: _DownloadRunContext,
         downloader: ImageDownloader,
     ) -> None:
         super().__init__()
-        self._product_data = product_data
+        self._context = context
         self._downloader = downloader
-        self._cancel_event = threading.Event()
-
-    def cancel(self) -> None:
-        """Request cooperative cancellation from any thread."""
-        self._cancel_event.set()
 
     @Slot()
     def run(self) -> None:
-        """Execute the blocking network loop in the owning QThread."""
-        product_folder = self._product_data.product_folder
-        if product_folder is None:
-            self.failed.emit("Thư mục sản phẩm chưa sẵn sàng.")
-            return
-
+        """Execute all meaningful filesystem/network work in this QThread."""
         try:
-            result = self._downloader.download_product_images(
-                self._product_data.images,
-                product_folder,
-                progress_callback=self.progress.emit,
-                cancel_check=self._cancel_event.is_set,
+            self._raise_if_cancelled()
+            try:
+                product_folder = ensure_product_folder(
+                    self._context.output_root,
+                    self._context.product.product_name,
+                    self._context.product.shop_id,
+                    self._context.product.item_id,
+                )
+            except ProductFolderError:
+                logger.exception(
+                    "Không thể tạo thư mục cho %s",
+                    self._context.product.product_key,
+                )
+                self._set_failure(
+                    "PRODUCT_FOLDER_ERROR",
+                    "Không thể tạo thư mục sản phẩm.",
+                )
+                return
+
+            self._context.product = replace(
+                self._context.product,
+                images=list(self._context.product.images),
+                product_folder=product_folder,
             )
+            self._raise_if_cancelled()
+            self.folder_ready.emit(self._context.product)
+
+            try:
+                result = self._downloader.download_product_images(
+                    self._context.product.images,
+                    product_folder,
+                    progress_callback=self._emit_progress,
+                    cancel_check=self._context.cancel_event.is_set,
+                )
+            except DownloadCancelledError:
+                self._context.terminal_kind = "cancelled"
+            except Exception:
+                logger.exception(
+                    "Lỗi không mong đợi khi tải ảnh cho %s",
+                    self._context.product.product_key,
+                )
+                self._set_failure(
+                    "IMAGE_DOWNLOAD_ERROR",
+                    "Không thể hoàn tất tải ảnh sản phẩm.",
+                )
+            else:
+                self._context.result = result
+                self._context.terminal_kind = "finished"
         except DownloadCancelledError:
-            self.cancelled.emit()
-        except (OSError, RuntimeError, ValueError):
+            self._context.terminal_kind = "cancelled"
+        except Exception:
             logger.exception(
-                "Lỗi không mong đợi khi tải ảnh cho %s",
-                self._product_data.product_key,
+                "Worker pipeline bị lỗi ngoài dự kiến cho %s",
+                self._context.product.product_key,
             )
-            self.failed.emit("Không thể hoàn tất tải ảnh sản phẩm.")
-        else:
-            self.finished.emit(result)
+            self._set_failure(
+                "IMAGE_DOWNLOAD_ERROR",
+                "Không thể hoàn tất xử lý sản phẩm.",
+            )
+        finally:
+            if self._context.cancel_event.is_set():
+                self._context.terminal_kind = "cancelled"
+                self._context.result = None
+                self._context.error_code = None
+                self._context.error_message = None
+            if self._context.terminal_kind is None:
+                self._set_failure(
+                    "IMAGE_DOWNLOAD_ERROR",
+                    "Worker kết thúc mà không có kết quả.",
+                )
+            self.done.emit()
+
+    def _emit_progress(self, completed: int, total: int) -> None:
+        self.progress.emit(self._context.product, completed, total)
+
+    def _set_failure(self, error_code: str, message: str) -> None:
+        self._context.terminal_kind = "failed"
+        self._context.error_code = error_code
+        self._context.error_message = message
+
+    def _raise_if_cancelled(self) -> None:
+        if self._context.cancel_event.is_set():
+            raise DownloadCancelledError("Đã hủy tải ảnh.")
 
 
 class ImageDownloadController(QObject):
-    """Own one QThread at a time and expose product-scoped Qt signals."""
+    """Own and clean exactly one product pipeline QThread at a time."""
 
-    started = Signal(object)  # BridgeProductData
-    progress = Signal(object, int, int)  # (product, completed index, total)
-    finished = Signal(object, object)  # (product, ProductDownloadResult)
-    failed = Signal(object, str)  # (product, concise message)
-    cancelled = Signal(object)  # BridgeProductData
+    started = Signal(object)
+    folder_ready = Signal(object)
+    progress = Signal(object, int, int)
+    finished = Signal(object, object)
+    failed = Signal(object, str, str)
+    cancelled = Signal(object)
+    idle = Signal()
 
     def __init__(
         self,
@@ -85,80 +161,131 @@ class ImageDownloadController(QObject):
         self._downloader = downloader or ImageDownloader()
         self._thread: QThread | None = None
         self._worker: ImageDownloadWorker | None = None
-        self._active_product: BridgeProductData | None = None
+        self._context: _DownloadRunContext | None = None
 
     @property
     def is_busy(self) -> bool:
-        """Return whether one product download is active or cleaning up."""
-        return self._active_product is not None or self._thread is not None
+        """Return whether one pipeline is active or tearing down."""
+        return self._context is not None or self._thread is not None
 
-    def start(self, product_data: BridgeProductData) -> bool:
-        """Start one product download, returning False when already busy."""
+    @property
+    def active_request_id(self) -> str | None:
+        """Return the request owned by the active worker, if any."""
+        if self._context is None:
+            return None
+        return self._context.product.request_id
+
+    def start(self, product_data: BridgeProductData, output_root: str) -> bool:
+        """Start one worker pipeline without doing filesystem work in the GUI."""
         if self.is_busy:
-            logger.warning("Bỏ qua yêu cầu tải ảnh đồng thời cho %s", product_data.product_key)
+            logger.warning(
+                "Bỏ qua yêu cầu tải ảnh đồng thời cho %s",
+                product_data.product_key,
+            )
             return False
 
-        product_folder = product_data.product_folder
-        if product_folder is None or not Path(product_folder).is_dir():
-            self.failed.emit(product_data, "Thư mục sản phẩm chưa sẵn sàng.")
-            return False
-
+        context = _DownloadRunContext(
+            product=replace(
+                product_data,
+                images=list(product_data.images),
+                product_folder=None,
+                download_result=None,
+            ),
+            output_root=str(output_root),
+            cancel_event=threading.Event(),
+        )
         thread = QThread(self)
-        worker = ImageDownloadWorker(product_data, self._downloader)
+        worker = ImageDownloadWorker(context, self._downloader)
         worker.moveToThread(thread)
 
         thread.started.connect(worker.run)
+        worker.folder_ready.connect(self._on_folder_ready)
         worker.progress.connect(self._on_progress)
-        worker.finished.connect(self._on_finished)
-        worker.failed.connect(self._on_failed)
-        worker.cancelled.connect(self._on_cancelled)
-        worker.finished.connect(thread.quit)
-        worker.failed.connect(thread.quit)
-        worker.cancelled.connect(thread.quit)
-        worker.finished.connect(worker.deleteLater)
-        worker.failed.connect(worker.deleteLater)
-        worker.cancelled.connect(worker.deleteLater)
-        thread.finished.connect(self._on_thread_finished)
+        worker.done.connect(thread.quit)
+        worker.done.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
+        thread.destroyed.connect(self._on_thread_destroyed)
 
-        self._active_product = product_data
+        self._context = context
         self._thread = thread
         self._worker = worker
-        self.started.emit(product_data)
+        self.started.emit(context.product)
         thread.start()
         return True
 
-    def cancel(self) -> None:
-        """Cooperatively cancel the active image request."""
-        if self._worker is not None:
-            self._worker.cancel()
-
-    @Slot(int, int)
-    def _on_progress(self, index: int, total: int) -> None:
-        product = self._active_product
-        if product is not None:
-            self.progress.emit(product, index, total)
+    def cancel(self, request_id: str | None = None) -> bool:
+        """Request cooperative cancellation for the matching active pipeline."""
+        context = self._context
+        if context is None:
+            return False
+        if request_id is not None and context.product.request_id != request_id:
+            logger.warning(
+                "Bỏ qua yêu cầu hủy worker cũ/lệch: %s", request_id
+            )
+            return False
+        context.cancel_event.set()
+        return True
 
     @Slot(object)
-    def _on_finished(self, result: ProductDownloadResult) -> None:
-        product = self._active_product
-        if product is not None:
-            self.finished.emit(product, result)
+    def _on_folder_ready(self, product: BridgeProductData) -> None:
+        context = self._context
+        if context is None or not self._matches_context(context, product):
+            logger.debug("Bỏ qua folder_ready của worker cũ")
+            return
+        context.product = product
+        context.folder_published = True
+        self.folder_ready.emit(product)
 
-    @Slot(str)
-    def _on_failed(self, message: str) -> None:
-        product = self._active_product
-        if product is not None:
-            self.failed.emit(product, message)
+    @Slot(object, int, int)
+    def _on_progress(
+        self,
+        product: BridgeProductData,
+        completed: int,
+        total: int,
+    ) -> None:
+        context = self._context
+        if context is None or not self._matches_context(context, product):
+            logger.debug("Bỏ qua progress của worker cũ")
+            return
+        self.progress.emit(product, completed, total)
 
     @Slot()
-    def _on_cancelled(self) -> None:
-        product = self._active_product
-        if product is not None:
-            self.cancelled.emit(product)
-
-    @Slot()
-    def _on_thread_finished(self) -> None:
+    def _on_thread_destroyed(self) -> None:
+        """Publish the outcome only after QThread deleteLater has completed."""
+        context = self._context
         self._worker = None
         self._thread = None
-        self._active_product = None
+        self._context = None
+
+        if context is None:
+            self.idle.emit()
+            return
+
+        product = context.product
+        if product.product_folder is not None and not context.folder_published:
+            context.folder_published = True
+            self.folder_ready.emit(product)
+        if context.cancel_event.is_set() or context.terminal_kind == "cancelled":
+            self.cancelled.emit(product)
+        elif context.terminal_kind == "finished" and context.result is not None:
+            self.finished.emit(product, context.result)
+        else:
+            self.failed.emit(
+                product,
+                context.error_code or "IMAGE_DOWNLOAD_ERROR",
+                context.error_message or "Không thể hoàn tất xử lý sản phẩm.",
+            )
+        self.idle.emit()
+
+    @staticmethod
+    def _matches_context(
+        context: _DownloadRunContext,
+        product: BridgeProductData,
+    ) -> bool:
+        expected = context.product
+        return (
+            product.request_id == expected.request_id
+            and product.product_key == expected.product_key
+            and product.product_name == expected.product_name
+            and list(product.images) == list(expected.images)
+        )

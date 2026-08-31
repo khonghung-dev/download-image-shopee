@@ -17,6 +17,7 @@ The suite is offline and protects the current architecture rather than deleted i
 | `test_ui.py` | Current widgets, start guard, queue/bridge integration, single row updates, manual deduplication |
 | `test_product_folder.py` | Unicode/Windows sanitization, device names, fallback and length policy, containment, output-root failures, and provisional collisions |
 | `test_image_downloader.py` | Ordered filenames, MIME extensions, bounded retries/timeouts, invalid responses, atomic cleanup, existing-file skip, nine-image model integration, cancellation, and QThread execution |
+| `test_task_010_batch_reliability.py` | 10-item FIFO execution, middle-stage failure continuation, stale extraction/worker events, double start, cancellation terminalization, product isolation, GUI responsiveness, worker cleanup, and close-during-download |
 
 Deleted Playwright authentication, Python metadata-extractor, URL-resolver, and workaround-protocol tests are not part of the active suite.
 
@@ -75,5 +76,19 @@ JavaScript syntax checks require Node.js and are invoked by `test_extension_extr
 - A nine-URL desktop product produces nine final files, `total=9`, `successful=9`, `failed=0`, and an unchanged nine-entry `images` list.
 - Queue tests prove that Product B is not opened when Product A merely receives its extension result; Product A's background image result must arrive first.
 - A Qt test records the downloader thread identity and verifies it differs from the GUI/test thread.
+
+## Task 010 batch regressions
+
+- Ten successful mock products retain input order, reach `SUCCESS`, and never exceed one active product.
+- Extraction, folder, or downloader failure for the middle product produces `SUCCESS / FAILED / SUCCESS` and reaches full terminal progress.
+- Late `product_result`, extraction progress, image progress, and download completion from Product A cannot mutate Product B.
+- A repeated `start_batch()` while running returns `False` and emits no second `open_product`.
+- Cancelling while Product 3 downloads opens no Product 4, cooperatively stops the worker, marks current/pending items `CANCELLED`, and reaches a complete terminal summary.
+- Product models copy mutable image lists at boundaries, preserving per-item data isolation and the authoritative nine-image list.
+- A deliberately held background download allows a GUI `QTimer` to fire, proving the Qt event loop is not blocked by product filesystem/network work.
+- Sequential controller runs publish terminal outcomes only after QThread exit and cleared worker/thread references.
+- Closing a visible window during a cooperative download defers the close until the controller is idle, with no remaining worker/thread references or `.part` files.
+
+Task 010 tests use synthetic models, test doubles, and local filesystem paths only. They do not access Shopee, change the extension/native stack, add generalized retry behavior, or implement Task 012 duplicate semantics.
 
 Do not weaken extraction tests to make a failing implementation appear green. Record pre-existing failures separately from cleanup-introduced failures.

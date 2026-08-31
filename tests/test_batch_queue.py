@@ -33,11 +33,16 @@ from shopee_image_downloader.core.url_validator import parse_url_lines
 def queue_manager(qtbot) -> BatchQueueManager:
     """Fixture providing a BatchQueueManager instance with short timeout."""
     manager = BatchQueueManager(item_timeout_ms=500)
-    manager.item_download_requested.connect(
-        lambda _row, product: manager.handle_download_result(
-            _with_successful_download(product)
+
+    def complete_download(_row: int, product: BridgeProductData) -> None:
+        enriched = replace(
+            product,
+            product_folder=Path(f"product-{product.item_id}"),
         )
-    )
+        manager.handle_product_folder_ready(enriched)
+        manager.handle_download_result(_with_successful_download(enriched))
+
+    manager.item_download_requested.connect(complete_download)
     return manager
 
 
@@ -89,7 +94,7 @@ def test_three_valid_urls_processed_sequentially(qtbot, queue_manager) -> None:
 
     # Progress stages for item 1
     queue_manager.handle_process_progress(req1, "scanning_gallery")
-    assert queue_manager.current_item.state == ItemState.SCANNING
+    assert queue_manager.current_item.state == ItemState.WAITING_EXTRACTION
 
     # Complete item 1
     data1 = BridgeProductData(
@@ -367,7 +372,8 @@ def test_cancel_batch_stops_queue_and_resets(qtbot, queue_manager) -> None:
     assert len(batch_finished_events) == 1
     s, f, items = batch_finished_events[0]
     assert s == 0
-    assert f == 1  # In-flight item counted as cancelled/failed
+    assert f == 0
+    assert sum(item.state == ItemState.CANCELLED for item in items) == 2
 
 
 def test_batch_queue_accepts_authoritative_9_images(qtbot, queue_manager) -> None:
@@ -538,12 +544,14 @@ def test_queue_does_not_advance_until_image_download_finishes(qtbot) -> None:
 
     manager.handle_product_result(product)
 
-    assert manager.current_item.state == ItemState.DOWNLOADING
+    assert manager.current_item.state == ItemState.CREATING_FOLDER
     assert started_rows == [0]
     assert requested_products == [product]
     assert manager.get_finished_count() == 0
 
-    manager.handle_download_result(_with_successful_download(product))
+    enriched = replace(product, product_folder=Path("product-201"))
+    manager.handle_product_folder_ready(enriched)
+    manager.handle_download_result(_with_successful_download(enriched))
 
     assert started_rows == [0, 1]
     assert manager.current_item.row_idx == 1
@@ -575,6 +583,8 @@ def test_partial_image_failure_is_completed_with_errors_and_batch_continues(
         request_id=request_id,
     )
     manager.handle_product_result(product)
+    product = replace(product, product_folder=Path("product-201"))
+    manager.handle_product_folder_ready(product)
     per_image = (
         ImageDownloadResult(
             index=1,

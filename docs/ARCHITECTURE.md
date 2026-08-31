@@ -7,9 +7,10 @@ This document describes the only active runtime architecture. Historical Playwri
 ```mermaid
 flowchart LR
     UI[PySide6 MainWindow] --> Queue[BatchQueueManager]
-    Queue --> DownloadWorker[ImageDownloadController / QThread]
-    DownloadWorker --> Downloader[core/ImageDownloader]
-    Downloader --> ProductFolder[product.product_folder]
+    Queue --> ProductWorker[ImageDownloadController / QThread]
+    ProductWorker --> ProductFolder[Product Folder Manager]
+    ProductWorker --> Downloader[core/ImageDownloader]
+    Downloader --> ProductPath[product.product_folder]
     Queue --> Bridge[ExtensionBridgeServer]
     Bridge <-->|WebSocket 127.0.0.1:8765| Host[Native Messaging Host]
     Host <-->|4-byte framed stdio| Background[Extension background.js]
@@ -39,13 +40,14 @@ When the user pastes URLs and clicks **Bắt đầu tải ảnh**, the exact cal
 12. A complete extraction is normalized by `buildProductSnapshot()` and emitted as `AUTHORITATIVE_PRODUCT_COMPLETE`.
 13. `background.js` correlates the worker tab, product key, and request ID, then calls the only final-result builder, `sendCompleteProductToDesktop()`.
 14. The `product_result` crosses Native Messaging, the Native Host WebSocket relay, `ExtensionBridgeServer._on_text_message()`, and `parse_bridge_product_data()`.
-15. `MainWindow._on_bridge_product_received()` asks the desktop-owned Product Folder Manager to create a safe child directory under the selected output root.
-16. The resulting `Path` is attached to the existing `BridgeProductData.product_folder` field without changing the authoritative name, IDs, or image list.
-17. `MainWindow` hands the correlated enriched model to `BatchQueueManager.handle_product_result()`.
-18. The queue stops its extraction timeout, enters `DOWNLOADING`, and emits `item_download_requested` without advancing.
-19. `ImageDownloadController` moves an `ImageDownloadWorker` to a dedicated `QThread`. The worker passes `product.images` unchanged, in order, to the Qt-independent `ImageDownloader` and writes only below `product.product_folder`.
-20. Worker progress is emitted to the existing table status (`Đang tải ảnh n/total`). When every URL has reached a terminal image result, the controller attaches `ProductDownloadResult` to the same `BridgeProductData` model.
-21. `BatchQueueManager.handle_download_result()` marks the item `SUCCESS` or `COMPLETED_WITH_ERRORS`, emits `item_completed`, and only then advances to the next product. Folder or unexpected worker failures use the queue's controlled per-item failure path.
+15. `MainWindow._on_bridge_product_received()` routes every session-known `request_id` to `BatchQueueManager`; stale, missing, or mismatched IDs cannot enter the batch pipeline.
+16. The queue validates the authoritative image count, snapshots the product image list, enters `CREATING_FOLDER`, and emits one worker-pipeline request without advancing.
+17. `ImageDownloadController` moves an `ImageDownloadWorker` to a dedicated `QThread`. In that thread, the desktop-owned Product Folder Manager creates the safe child directory under the selected output root.
+18. The worker attaches the resulting `Path` to `BridgeProductData.product_folder` without changing the authoritative name, IDs, or image list. Its correlated `folder_ready` event moves the queue to `DOWNLOADING`.
+19. In the same worker thread, `ImageDownloader` receives `product.images` unchanged and in order and writes only below that exact `product.product_folder`.
+20. Correlated worker progress updates the table status (`Đang tải ảnh n/total`). Overall batch progress remains based only on terminal queue items.
+21. The worker stores its terminal outcome, requests `QThread` shutdown, and the controller clears its worker/thread ownership before publishing `finished`, `failed`, or `cancelled` to the UI.
+22. `BatchQueueManager.handle_download_result()` validates the request ID, product key, product name, image list, product folder, ordered per-image results, and totals. It marks the item `SUCCESS` or `COMPLETED_WITH_ERRORS`, then and only then advances to the next product. Controlled folder/downloader failures mark only that item `FAILED` and continue.
 
 This is the single automatic batch flow. There is no `process_url` alias and no polling-based `RUN_FULL_SCAN` path.
 
@@ -66,9 +68,9 @@ This is the single automatic batch flow. There is no `process_url` alias and no 
 | Component | Owns | Must not own |
 |---|---|---|
 | `MainWindow` | User input, folder selection, result presentation, signal wiring, desktop result/download orchestration | Shopee extraction, path-sanitization rules, blocking network calls |
-| `BatchQueueManager` | FIFO state, request correlation, extraction timeout, download lifecycle gate, verification pause/resume, cancellation | Browser/tab control, DOM extraction, network transfer |
+| `BatchQueueManager` | FIFO state, transition guards, request/product/folder correlation, extraction timeout, progress, verification pause/resume, cancellation | Browser/tab control, DOM extraction, filesystem/network work |
 | `core/image_downloader.py` | Ordered image HTTP requests, MIME/extension choice, bounded retry/timeout, atomic file commits, per-image/product results | Shopee discovery or extraction, Qt/UI state, product folder creation |
-| `workers/image_download_worker.py` | One-product-at-a-time `QThread` execution, progress and cooperative cancellation signals | Filename/MIME/retry policy, extraction |
+| `workers/image_download_worker.py` | One-product-at-a-time folder/download `QThread`, correlated progress/outcome context, cooperative cancellation, exact cleanup | Filename/MIME/retry policy, extraction |
 | `storage/product_folder.py` | Windows-safe product folder naming, collision suffix, output-root validation and containment | Image downloading, duplicate-product semantics, UI presentation |
 | `ExtensionBridgeServer` | Loopback WebSocket lifecycle, inbound validation, Qt signals | Shopee business extraction |
 | Native Host | Native Messaging framing and localhost relay | Product construction, extraction, queue policy |
@@ -103,6 +105,32 @@ This is the single automatic batch flow. There is no `process_url` alias and no 
 
 The Native Host relays messages between the two transport boundaries but does not rebuild or interpret product data.
 
+## Task 010 batch lifecycle and correlation
+
+Each queue item has one lifecycle. `COMPLETED_WITH_ERRORS` preserves Task 007B's partial-image result semantics and is terminal; it is not a second queue state system.
+
+```text
+PENDING
+  → OPENING_PRODUCT
+  → WAITING_EXTRACTION
+  → CREATING_FOLDER
+  → DOWNLOADING
+  → SUCCESS | COMPLETED_WITH_ERRORS
+
+Any active state → FAILED
+Any non-terminal state during cancellation → CANCELLED
+```
+
+The queue has at most one current product. Product B's `open_product` is emitted only after Product A's download worker has produced a terminal result, its `QThread` has finished, controller-owned worker/thread references have been cleared, and Product A has been finalized.
+
+`request_id` is mandatory for batch `product_result` events. Extraction progress and errors require the current request ID. Folder readiness, download progress, failure, cancellation, and completion additionally match product identity and the authoritative image list; download-phase events also match the exact product folder. Session-known stale request IDs remain classified as batch traffic after completion or cancellation and are ignored rather than reinterpreted as manual sends.
+
+Overall progress is `terminal items / total items`. Terminal items are `SUCCESS`, `COMPLETED_WITH_ERRORS`, `FAILED`, and `CANCELLED`; a currently downloading product does not increment it. Current-product progress is kept separately in its table row as `Đang tải ảnh n/total`. Final summaries derive success, failure, and cancellation counts from the terminal item states.
+
+Cancellation changes the queue to `CANCELLING`, prevents any new `open_product`, sends the existing Chrome cancellation message, and cooperatively signals an active worker. Pending inputs are marked `CANCELLED`. If extraction is still pending, the queue finalizes immediately and rejects later results. If a folder/download worker is active, batch completion waits for the worker's clean exit. The downloader checks cancellation between images and chunks, removes current `.part` files, and retains completed images.
+
+Closing the application uses the same cooperative path. A close event is deferred while a worker is active and retried from the controller's `idle` signal, avoiding both an unbounded GUI-thread wait and destruction of a running `QThread`.
+
 ## Storage, downloader policy, and concurrency
 
 `SettingsManager` persists only the selected output folder. `storage/product_folder.py` creates exactly one direct child for each successful item. It preserves Unicode, replaces Windows-invalid characters and ASCII controls, normalizes whitespace, protects reserved device names, falls back to `product_<shop_id>_<item_id>`, limits the component to 120 characters, and verifies resolved-path containment. If the primary title directory exists, the provisional Task 007A collision form is `<title> [<shop_id>-<item_id>]`; full duplicate semantics remain deferred to Task 012.
@@ -117,7 +145,7 @@ Each transfer writes `<sequential-name>.<ext>.part`, flushes and closes it, then
 
 `ProductDownloadResult` stores `total`, `successful`, `failed`, `skipped`, and ordered per-image results (`index`, `source_url`, `target_path`, `status`, `attempts`, `error`) on the existing product model. One failed image leaves prior valid files in place and produces `COMPLETED_WITH_ERRORS`; it does not abort the remaining image URLs or the following product.
 
-The blocking standard-library HTTP/file loop runs only inside `ImageDownloadWorker` on a dedicated `QThread`. Products remain sequential: extraction A → folder A → all downloads A → terminal result A → extraction B. Cancellation is cooperative between images and chunks; completed files are retained. The Qt GUI thread performs only orchestration and presentation.
+Product-folder creation and the blocking standard-library HTTP/file loop run only inside `ImageDownloadWorker` on a dedicated `QThread`. Products remain sequential: extraction A → folder A → all downloads A → worker cleanup A → terminal item A → extraction B. Retry/backoff remains the bounded Task 007B per-image policy; Task 010 adds no generalized retry framework. The Qt GUI thread performs only validation, orchestration, and presentation.
 
 ## Required generated runtime artifact
 

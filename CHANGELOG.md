@@ -11,15 +11,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added Task 007A's Windows-safe Product Folder Manager and stored `product_folder` on the existing desktop product model.
 - Added Task 007B's deterministic standard-library image downloader, MIME-aware sequential filenames, bounded retry/timeout policy, atomic `.part` writes, and structured per-image/product results.
 - Added a dedicated Qt worker/controller so image network transfers run outside the GUI thread and the batch queue waits for downloads before advancing.
+- Added Task 010's guarded product lifecycle, terminal-state progress, cancellation counts, stale-event regressions, and 10-product reliability coverage.
 
 ### Changed
 - Consolidated the runtime around PySide6 → localhost WebSocket → Native Host → Chrome Native Messaging → service worker → content script → `extractor_core.js`.
 - Made `open_product` the sole automatic batch command and `sendCompleteProductToDesktop()` the sole extension `product_result` builder.
 - Made the content script the single extraction RPC boundary for automatic and manual flows.
 - Rewrote architecture, testing, task, and extension documentation around the active runtime.
+- Moved product-folder creation into the per-product worker thread and delayed terminal callbacks until the QThread is finished and controller ownership is cleared.
+- Correlated download callbacks by request ID, product identity, authoritative image list, and product folder before they can update or finalize a queue item.
 
 ### Fixed
 - Restored manual Chrome Extension full-gallery traversal by waiting for ordered carousel media identities to advance, excluding video media, and refusing to promote a visible-only four-image window to `COMPLETE`.
+- Prevented duplicate dispatch/advance, stale callbacks completing the next product, cancellation being counted as failure, pending items remaining non-terminal after cancellation, and application close destroying an active QThread.
 
 ### Removed
 - Removed the unused Python browser-session, authentication, URL-resolver, metadata-extractor, and associated worker implementations.
