@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added Task 011's canonical error taxonomy, staged diagnostics, bounded product extraction retry, request-generation correlation, and retry/cancellation regressions.
 - Added Task 012's canonical product identity, atomic `.shopee-product-id` ownership marker, cross-run folder reuse, and same-batch `SKIPPED_DUPLICATE` state.
 - Added Task 013's schema-versioned UTF-8 `product.json`, pure metadata builder, atomic writer, metadata error stage, and automatic/manual lifecycle coverage.
+- Added Task 014's polished PySide6 hierarchy, separate Start/Cancel/Continue controls, parser-derived URL count, model-driven status presentation, per-image/current-product progress, and reusable second-batch UI regressions.
 
 ### Changed
 - Consolidated the runtime around PySide6 → localhost WebSocket → Native Host → Chrome Native Messaging → service worker → content script → `extractor_core.js`.
@@ -27,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added bounded HTTP 429 `Retry-After` handling and permanent permission/disk-full write failures without deleting completed images.
 - Made marker-owned folders stable across title changes, kept unmarked/corrupt/mismatched folders untouched, and reused Task 007B to complete partial historical downloads.
 - Made each completed managed download refresh one portable metadata file from authoritative images and final current-run download results without changing marker ownership.
+- Centralized UI state labels, restrained tones, partial/existing-image counts, and terminal batch summaries in a presentation helper while keeping queue/item models authoritative.
 
 ### Fixed
 - Restored manual Chrome Extension full-gallery traversal by waiting for ordered carousel media identities to advance, excluding video media, and refusing to promote a visible-only four-image window to `COMPLETE`.

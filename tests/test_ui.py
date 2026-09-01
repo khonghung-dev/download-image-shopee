@@ -20,13 +20,7 @@ from PySide6.QtWidgets import (
 )
 
 from shopee_image_downloader.app import create_application
-from shopee_image_downloader.core.batch_queue import (
-    QueueState,
-    STATUS_DISPLAY_CANCELLED,
-    STATUS_DISPLAY_SCANNING,
-    STATUS_DISPLAY_SUCCESS,
-    STATUS_DISPLAY_VERIFICATION,
-)
+from shopee_image_downloader.core.batch_queue import QueueState
 from shopee_image_downloader.core.bridge_protocol import BridgeProductData
 from shopee_image_downloader.core.image_downloader import (
     ImageDownloadResult,
@@ -209,19 +203,24 @@ def test_main_window_ui_components(tmp_path: Path) -> None:
     assert window.bridge_title_label.text() == "Chrome Extension:"
     assert window.bridge_status_label.text() == "🔴 Chưa kết nối"
     assert isinstance(window.url_input, QPlainTextEdit)
-    assert window.url_input.placeholderText() == "Dán mỗi link Shopee trên một dòng..."
+    assert window.url_input.placeholderText() == (
+        "Dán link sản phẩm Shopee tại đây, mỗi dòng một link..."
+    )
+    assert window.url_count_label.text() == "0 link hợp lệ"
     assert isinstance(window.output_folder_input, QLineEdit)
     assert window.output_folder_input.isReadOnly()
     assert isinstance(window.select_folder_button, QPushButton)
     assert window.select_folder_button.text() == "Chọn thư mục"
     assert window.start_button.text() == "Bắt đầu tải ảnh"
+    assert window.start_button.isEnabled()
+    assert not window.cancel_button.isEnabled()
     assert isinstance(window.progress_bar, QProgressBar)
     assert window.progress_bar.value() == 0
     assert isinstance(window.results_table, QTableWidget)
     assert [
         window.results_table.horizontalHeaderItem(index).text()
         for index in range(window.results_table.columnCount())
-    ] == ["STT", "Sản phẩm / Link", "Trạng thái", "Số ảnh"]
+    ] == ["STT", "Sản phẩm", "Ảnh", "Trạng thái"]
 
     window.close()
 
@@ -234,7 +233,7 @@ def test_main_window_bridge_guard_when_disconnected(tmp_path: Path) -> None:
 
     assert window.status_label.text() == "Chrome Extension chưa kết nối."
     assert window.results_table.rowCount() == 1
-    assert window.results_table.item(0, 2).text() == "Đang chờ"
+    assert window.results_table.item(0, 3).text() == "Chờ xử lý"
     window.close()
 
 
@@ -293,14 +292,18 @@ def test_main_window_empty_and_invalid_input(tmp_path: Path) -> None:
 
     window.url_input.setPlainText("   \n\n")
     window.start_button.click()
-    assert window.status_label.text() == "Chưa nhập link"
+    assert window.status_label.text() == (
+        "Vui lòng nhập ít nhất một link Shopee hợp lệ."
+    )
 
     window.url_input.setPlainText("https://google.com\nhttps://lazada.vn")
     window.start_button.click()
     assert window.results_table.rowCount() == 2
-    assert window.results_table.item(0, 2).text() == "Link không hợp lệ"
-    assert window.results_table.item(1, 2).text() == "Link không hợp lệ"
-    assert window.status_label.text() == "Đã nhận 0 link hợp lệ"
+    assert window.results_table.item(0, 3).text() == "Link không hợp lệ"
+    assert window.results_table.item(1, 3).text() == "Link không hợp lệ"
+    assert window.status_label.text() == (
+        "Vui lòng nhập ít nhất một link Shopee hợp lệ."
+    )
     window.close()
 
 
@@ -323,7 +326,10 @@ def test_main_window_batch_queue_ui_flow(tmp_path: Path, qtbot) -> None:
     window.start_button.click()
 
     assert window.results_table.rowCount() == 3
-    assert window.start_button.text() == "Hủy"
+    assert not window.start_button.isEnabled()
+    assert window.cancel_button.isEnabled()
+    assert not window.url_input.isEnabled()
+    assert not window.select_folder_button.isEnabled()
     assert len(sent_messages) == 1
     first_open = json.loads(sent_messages[0])
     assert first_open["type"] == "open_product"
@@ -331,14 +337,19 @@ def test_main_window_batch_queue_ui_flow(tmp_path: Path, qtbot) -> None:
 
     first_request = window.queue_manager.current_item.request_id
     window._on_bridge_process_progress_received(first_request, "scanning_gallery")
-    assert window.results_table.item(0, 2).text() == STATUS_DISPLAY_SCANNING
+    assert window.results_table.item(0, 3).text() == "Đang lấy dữ liệu"
 
     update_calls: list[tuple[int, BridgeProductData]] = []
     original_update = window._update_table_row
 
-    def record_update(row: int, data: BridgeProductData, status_text: str = STATUS_DISPLAY_SUCCESS) -> None:
+    def record_update(
+        row: int,
+        data: BridgeProductData,
+        status_text: str = "Hoàn tất",
+        **kwargs,
+    ) -> None:
         update_calls.append((row, data))
-        original_update(row, data, status_text)
+        original_update(row, data, status_text, **kwargs)
 
     window._update_table_row = record_update
     window._on_bridge_product_received(
@@ -359,7 +370,7 @@ def test_main_window_batch_queue_ui_flow(tmp_path: Path, qtbot) -> None:
 
     assert window.results_table.item(0, 1).text() == "Sản phẩm 1"
     assert window.results_table.item(1, 1).text() == "Sản phẩm 2"
-    assert window.status_label.text() == "Hoàn tất 2/2: 2 thành công, 0 lỗi"
+    assert window.status_label.text() == "Hoàn tất 2/2 sản phẩm."
     assert window.progress_bar.value() == 100
     assert window.start_button.text() == "Bắt đầu tải ảnh"
     window.close()
@@ -386,16 +397,18 @@ def test_main_window_batch_verification_resume_and_cancel(tmp_path: Path, qtbot)
     )
 
     assert window.queue_manager.state == QueueState.PAUSED_VERIFICATION
-    assert window.results_table.item(0, 2).text() == STATUS_DISPLAY_VERIFICATION
-    assert window.start_button.text() == "Tiếp tục"
+    assert window.results_table.item(0, 3).text() == "Cần xác minh trên Chrome"
+    assert not window.start_button.isEnabled()
+    assert window.continue_button.isVisibleTo(window)
+    assert window.continue_button.isEnabled()
 
-    window.start_button.click()
+    window.continue_button.click()
     assert window.queue_manager.state == QueueState.RUNNING
     assert len(sent_messages) == 2
 
-    window.start_button.click()
+    window.cancel_button.click()
     assert window.queue_manager.state == QueueState.IDLE
-    assert window.results_table.item(0, 2).text() == STATUS_DISPLAY_CANCELLED
+    assert window.results_table.item(0, 3).text() == "Đã hủy"
     assert json.loads(sent_messages[-1])["type"] == "batch_finished"
     window.close()
 
@@ -424,11 +437,11 @@ def test_cancel_during_download_stops_before_next_product(
     assert window.queue_manager.current_item.state.value == "DOWNLOADING"
     assert len(sent_messages) == 1
 
-    window.start_button.click()
+    window.cancel_button.click()
 
     assert controller.cancel_calls == 1
     assert window.queue_manager.state == QueueState.IDLE
-    assert window.results_table.item(0, 2).text() == STATUS_DISPLAY_CANCELLED
+    assert window.results_table.item(0, 3).text() == "Đã hủy"
     sent_types = [json.loads(message)["type"] for message in sent_messages]
     assert sent_types.count("open_product") == 1
     window.close()
@@ -453,7 +466,7 @@ def test_manual_product_reception_deduplicates_by_product_key(tmp_path: Path) ->
 
     assert window.results_table.rowCount() == 2
     assert window.results_table.item(0, 1).text() == "Product v2"
-    assert window.results_table.item(0, 3).text() == "3"
+    assert window.results_table.item(0, 2).text() == "3/3"
     assert window.results_table.item(1, 1).text() == "Different product"
     output_folders = sorted(
         path.name for path in (tmp_path / "output").iterdir() if path.is_dir()
@@ -488,12 +501,14 @@ def test_same_batch_product_duplicate_is_terminal_without_second_download(
     )
 
     assert controller.start_calls == ["1001:2001"]
-    assert window.results_table.item(0, 2).text() == "Đã tải 2/2 ảnh"
-    assert window.results_table.item(1, 2).text() == "Trùng - đã bỏ qua"
+    assert window.results_table.item(0, 3).text() == "Hoàn tất — 2/2 ảnh"
+    assert window.results_table.item(1, 3).text() == (
+        "Trùng sản phẩm — đã bỏ qua"
+    )
     assert window._rows_by_product_key["1001:2001"] == 0
     assert window.progress_bar.value() == 100
     assert window.status_label.text() == (
-        "Hoàn tất 2/2: 1 thành công, 1 trùng đã bỏ qua, 0 lỗi"
+        "Hoàn tất — 1 thành công · 1 trùng"
     )
     assert len(
         [path for path in (tmp_path / "output").iterdir() if path.is_dir()]
@@ -523,10 +538,10 @@ def test_batch_preserves_authoritative_nine_image_result(tmp_path: Path) -> None
     )
 
     stored = window._products_by_product_key["78513158:28469164720"]
-    assert window.results_table.item(0, 3).text() == "9"
+    assert window.results_table.item(0, 2).text() == "9/9"
     assert len(stored.images) == 9
-    assert window.results_table.item(0, 2).text() == "Đã tải 9/9 ảnh"
-    assert window.status_label.text() == "Hoàn tất 1/1: 1 thành công, 0 lỗi"
+    assert window.results_table.item(0, 3).text() == "Hoàn tất — 9/9 ảnh"
+    assert window.status_label.text() == "Hoàn tất 1/1 sản phẩm."
     window.close()
 
 
@@ -548,7 +563,7 @@ def test_batch_row_and_subsequent_manual_send_share_one_row(tmp_path: Path) -> N
 
     assert window.results_table.rowCount() == 1
     assert window.results_table.item(0, 1).text() == "Manual result"
-    assert window.results_table.item(0, 3).text() == "9"
+    assert window.results_table.item(0, 2).text() == "9/9"
     window.close()
 
 
@@ -605,8 +620,8 @@ def test_folder_failure_marks_batch_item_failed(tmp_path: Path) -> None:
 
     window._on_bridge_product_received(_product(request_id=request_id))
 
-    assert window.results_table.item(0, 2).text() == "Không thể tạo thư mục sản phẩm."
-    assert window.status_label.text() == "Hoàn tất 1/1: 0 thành công, 1 lỗi"
+    assert window.results_table.item(0, 3).text() == "Không thể tạo thư mục sản phẩm."
+    assert window.status_label.text() == "Hoàn tất — 0 thành công · 1 lỗi"
     window.close()
 
 
@@ -638,5 +653,5 @@ def test_folder_failure_does_not_corrupt_next_queue_item(tmp_path: Path) -> None
     stored = window._products_by_product_key["1002:2002"]
     assert stored.product_folder is not None
     assert stored.product_folder.is_dir()
-    assert window.status_label.text() == "Hoàn tất 2/2: 1 thành công, 1 lỗi"
+    assert window.status_label.text() == "Hoàn tất — 1 thành công · 1 lỗi"
     window.close()

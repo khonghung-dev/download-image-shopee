@@ -21,6 +21,7 @@ The suite is offline and protects the current architecture rather than deleted i
 | `test_task_011_error_retry.py` | Canonical classification, product retry/exhaustion, verification, stale attempt generations, 429/4xx/5xx policy, permission/disk full, cancellation/close backoff safety, multi-product totals, and nine-image preservation |
 | `test_task_012_duplicate_handling.py` | Canonical product keys, atomic markers, cross-run reuse/collisions, duplicate claims, same-batch skip, failure/retry distinctions, partial/complete reuse, zero-byte replacement, and image preservation |
 | `test_task_013_product_metadata.py` | Schema/identity/source fields, readable UTF-8, image order/filenames/statuses, partial/skipped summaries, atomic replacement/failure, marker independence, automatic/manual lifecycles, duplicate no-rewrite, and nine-image preservation |
+| `test_task_014_ui_polish.py` | Initial/running/finished/cancelled UI states, parser-derived URL count, retry/duplicate/partial displays, per-image and metadata progress, long content, row stability, and second-batch reuse |
 
 Deleted Playwright authentication, Python metadata-extractor, URL-resolver, and workaround-protocol tests are not part of the active suite.
 
@@ -141,5 +142,19 @@ Task 011 tests are offline and use Qt timers, scripted HTTP responses, injected 
 - A same-batch `SKIPPED_DUPLICATE` performs no second download, folder creation, or metadata rewrite.
 
 Task 013 tests use local synthetic models and downloader doubles only. They do not access Shopee, store sensitive values or absolute local paths, alter extraction code, delete stale images, rename folders, or add a catalog/database.
+
+## Task 014 UI regressions
+
+- Initial state keeps URL/output controls available, Start reusable under the existing validation behavior, Cancel disabled, and overall progress at zero.
+- Running state disables Start and input/output editing, enables one Cancel action, shows `Sản phẩm finished/total`, and keeps image progress separate.
+- Verification pauses the queue with Start disabled, Cancel available, an explicit `Tiếp tục` action, and concise Chrome instructions; it does not start an automatic retry timer.
+- Retry presentation shows `Đang thử lại 2/3...` on the same queue item and table row across the new transport request ID.
+- Success, partial, failure, duplicate, and cancellation text comes from authoritative `ItemState`/download results. `SKIPPED_DUPLICATE` is handled rather than red failure, and `SKIPPED_EXISTING` contributes to available images.
+- A nine-image result renders `9/9` after success without mutating the nine-entry authoritative model. A partial eight-of-nine result renders `8/9` and never claims `9/9` success.
+- Final summaries count terminal item states rather than table strings, controls are restored after every terminal batch, and a second batch starts without application restart.
+- Long output paths remain intact in the read-only flexible field and tooltip; long product names remain intact in the item/model while the table elides their display.
+- Default, minimum-size, and expanded layouts use Qt layouts/header policies instead of absolute positioning, keeping primary controls visible under common Windows display scaling.
+
+Task 014 tests use the offscreen Qt platform, synthetic bridge products, and deterministic controller doubles. They do not access Shopee, Chrome, or the network.
 
 Do not weaken extraction tests to make a failing implementation appear green. Record pre-existing failures separately from cleanup-introduced failures.

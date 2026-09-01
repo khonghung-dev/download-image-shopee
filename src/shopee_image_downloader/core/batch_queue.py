@@ -163,6 +163,7 @@ class BatchQueueManager(QObject):
     state_changed = Signal(str)
     item_started = Signal(int, str, str)  # row, input_url, request_id
     item_progress = Signal(int, str, str)  # row, stage, display text
+    item_image_progress = Signal(int, int, int)  # row, available, total
     item_download_requested = Signal(int, object)  # row, extracted product
     item_completed = Signal(int, object)  # row, completed product
     item_skipped_duplicate = Signal(int, object)  # row, reused product
@@ -554,6 +555,11 @@ class BatchQueueManager(QObject):
             item.stage,
             f"{STATUS_DISPLAY_DOWNLOADING} 0/{len(product_data.images)}",
         )
+        self.item_image_progress.emit(
+            item.row_idx,
+            0,
+            len(product_data.images),
+        )
 
     def handle_download_progress(
         self,
@@ -585,6 +591,26 @@ class BatchQueueManager(QObject):
             item.row_idx,
             "downloading",
             f"{STATUS_DISPLAY_DOWNLOADING} {completed}/{total}",
+        )
+        self.item_image_progress.emit(item.row_idx, completed, total)
+
+    def handle_metadata_started(self, product_data: BridgeProductData) -> None:
+        """Expose the existing metadata phase for correlated UI presentation."""
+        if self._state != QueueState.RUNNING:
+            return
+        item = self.current_item
+        if (
+            item is None
+            or item.state != ItemState.DOWNLOADING
+            or not self._matches_product(item, product_data, require_folder=True)
+        ):
+            logger.debug("Bỏ qua metadata progress cũ/lệch")
+            return
+        item.stage = "metadata"
+        self.item_progress.emit(
+            item.row_idx,
+            item.stage,
+            "Đang lưu thông tin sản phẩm...",
         )
 
     def handle_download_result(self, product_data: BridgeProductData) -> None:

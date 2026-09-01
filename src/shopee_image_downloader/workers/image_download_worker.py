@@ -52,6 +52,7 @@ class ImageDownloadWorker(QObject):
 
     folder_ready = Signal(object)
     progress = Signal(object, int, int)
+    metadata_started = Signal(object)
     done = Signal()
 
     def __init__(
@@ -132,6 +133,7 @@ class ImageDownloadWorker(QObject):
                 )
                 self._context.product = completed_product
                 self._raise_if_cancelled()
+                self.metadata_started.emit(completed_product)
                 try:
                     metadata = build_product_metadata(
                         completed_product,
@@ -200,6 +202,7 @@ class ImageDownloadController(QObject):
     started = Signal(object)
     folder_ready = Signal(object)
     progress = Signal(object, int, int)
+    metadata_started = Signal(object)
     finished = Signal(object, object)
     failed = Signal(object, str, str)
     cancelled = Signal(object)
@@ -254,6 +257,7 @@ class ImageDownloadController(QObject):
         thread.started.connect(worker.run)
         worker.folder_ready.connect(self._on_folder_ready)
         worker.progress.connect(self._on_progress)
+        worker.metadata_started.connect(self._on_metadata_started)
         worker.done.connect(thread.quit)
         worker.done.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
@@ -301,6 +305,15 @@ class ImageDownloadController(QObject):
             logger.debug("Bỏ qua progress của worker cũ")
             return
         self.progress.emit(product, completed, total)
+
+    @Slot(object)
+    def _on_metadata_started(self, product: BridgeProductData) -> None:
+        context = self._context
+        if context is None or not self._matches_context(context, product):
+            logger.debug("Bỏ qua metadata_started của worker cũ")
+            return
+        context.product = product
+        self.metadata_started.emit(product)
 
     @Slot()
     def _on_thread_destroyed(self) -> None:

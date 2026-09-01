@@ -69,7 +69,8 @@ This is the single automatic batch flow. There is no `process_url` alias and no 
 
 | Component | Owns | Must not own |
 |---|---|---|
-| `MainWindow` | User input, folder selection, result presentation, signal wiring, desktop result/download orchestration | Shopee extraction, path-sanitization rules, blocking network calls |
+| `MainWindow` | User input, folder selection, presentation binding, signal wiring, desktop result/download orchestration | Shopee extraction, path-sanitization rules, blocking network calls, UI-derived business state |
+| `ui/presentation.py` | Canonical Vietnamese `ItemState` labels, status tones, result counts, and terminal-state batch-summary formatting | Queue transitions, retry/duplicate policy, product identity, downloader results |
 | `BatchQueueManager` | FIFO state, transition guards, request/product/folder correlation, same-batch successful-product registry, extraction timeout, progress, verification pause/resume, cancellation | Browser/tab control, DOM extraction, filesystem/network work |
 | `core/image_downloader.py` | Ordered image HTTP requests, MIME/extension choice, bounded retry/timeout, atomic file commits, per-image/product results | Shopee discovery or extraction, Qt/UI state, product folder creation |
 | `core/product_metadata.py` | Pure metadata construction, portable relative image paths, UTF-8 JSON schema, atomic `product.json` replacement | Product identity ownership, downloading, folder naming, UI orchestration |
@@ -133,6 +134,14 @@ The queue has at most one current product. Product B's `open_product` is emitted
 `request_id` is mandatory for batch `product_result` events. Extraction progress and errors require the current request ID. Each automatic product retry creates a new transport request ID while retaining the same `QueueItem`, input URL, row, and ordering. The prior IDs remain session-known but no longer current, so late progress, errors, or results from an earlier attempt are ignored rather than completing a newer attempt or being reinterpreted as a manual send. Folder readiness, download progress, failure, cancellation, and completion additionally match product identity and the authoritative image list; download-phase events also match the exact product folder.
 
 Overall progress is `terminal items / total items`. Terminal items are `SUCCESS`, `SKIPPED_DUPLICATE`, `COMPLETED_WITH_ERRORS`, `FAILED`, and `CANCELLED`; a currently downloading product does not increment it. Current-product progress is kept separately in its table row as `Đang tải ảnh n/total`. Final summaries derive downloaded-success, duplicate, failure, and cancellation counts from the terminal item states.
+
+## Task 014 presentation ownership
+
+`MainWindow` renders the queue and worker models but does not infer lifecycle state from widget text. `ui/presentation.py` is the single presentation mapping for real `ItemState` values (`PENDING` through terminal states), restrained visual tones, structured image availability, and terminal-state summary text. Request-ID/product-key row indexes remain presentation correlations only; the queue and product models remain authoritative.
+
+The action contract is `IDLE` Start available under the existing validation behavior, `RUNNING` Start disabled/Cancel enabled, `PAUSED_VERIFICATION` Start disabled/Cancel and explicit Continue enabled, and `CANCELLING` both Start and Cancel disabled until terminal cleanup. URL input and output selection are locked while the queue or product worker is active and restored after completion/cancellation, so a second batch can reuse the same window.
+
+`BatchQueueManager.item_image_progress` exposes already-validated per-image counters independently of overall terminal-item progress. The worker/controller `metadata_started` signal and `BatchQueueManager.handle_metadata_started()` expose the existing `product.json` phase as the current item's presentation stage without adding an item state or changing metadata behavior. Final summaries consume the emitted `QueueItem` snapshots, never table cell strings.
 
 Cancellation changes the queue to `CANCELLING`, prevents any new `open_product`, sends the existing Chrome cancellation message, and cooperatively signals an active worker. Pending inputs are marked `CANCELLED`. If extraction is still pending, the queue finalizes immediately and rejects later results. If a folder/download worker is active, batch completion waits for the worker's clean exit. The downloader checks cancellation between images and chunks, removes current `.part` files, and retains completed images.
 

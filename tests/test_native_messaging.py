@@ -287,13 +287,13 @@ def test_duplicate_product_behavior_preserved(qtbot, tmp_path: Path) -> None:
     window._on_bridge_product_received(p1)
     assert window.results_table.rowCount() == 1
     assert window.results_table.item(0, 1).text() == "Product Alpha v1"
-    assert window.results_table.item(0, 3).text() == "1"
+    assert window.results_table.item(0, 2).text() == "1"
 
     # Send updated version of same shop_id:item_id
     window._on_bridge_product_received(p1_update)
     assert window.results_table.rowCount() == 1
     assert window.results_table.item(0, 1).text() == "Product Alpha v2 (Updated)"
-    assert window.results_table.item(0, 3).text() == "2"
+    assert window.results_table.item(0, 2).text() == "2"
 
     # Send distinct product
     window._on_bridge_product_received(p2)

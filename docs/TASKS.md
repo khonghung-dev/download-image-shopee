@@ -45,13 +45,18 @@ This file tracks the current architecture, not superseded implementation generat
 - [x] Task 013: readable UTF-8 JSON, portable exact local filenames, ordered per-image statuses, current-run download summary, and atomic replacement.
 - [x] Task 013: automatic and manual managed lifecycles write metadata after downloads; metadata failures use the Task 011 `METADATA` stage without deleting images.
 - [x] Task 013: cross-run metadata refresh, marker independence, same-batch duplicate no-rewrite, partial/skipped-existing, and nine-image regressions.
+- [x] Task 014: production-ready visual hierarchy for URL input, output folder, primary/secondary actions, batch progress, product results, and final summary.
+- [x] Task 014: separate Start/Cancel/verification Continue controls with active-batch input locking, single-shot cancellation, and reusable second-batch state.
+- [x] Task 014: canonical Vietnamese `ItemState` presentation mapping, restrained centralized status tones, normalized error display, and handled duplicate styling.
+- [x] Task 014: terminal-item overall progress, current-product/image/metadata progress, partial download counts, parser-based valid-link count, and model-derived final summaries.
+- [x] Task 014: long product/path handling, retry row stability, cancellation/verification UX, partial/duplicate/nine-image regressions, and Windows resize/DPI-safe layouts.
 
 ## Frozen extraction regression
 
 - [x] Known nine-image-plus-one-video product produces nine authoritative images in the automatic flow.
 - [x] The manual extension send uses the same authoritative nine-image result path.
 
-Tasks 007A/007B/012/013 do not modify the extension, Native Host, gallery traversal, video filtering, or authoritative cache. Task 013 is Python desktop metadata serialization and worker-lifecycle integration only.
+Tasks 007A/007B/012/013/014 do not modify the extension, Native Host, gallery traversal, video filtering, or authoritative cache. Task 013 is Python desktop metadata serialization and worker-lifecycle integration only; Task 014 is desktop presentation and existing-progress signal exposure only.
 
 ## Planned product work
 
@@ -66,3 +71,5 @@ Task 011 adds automatic retries only for transient product opening/extraction fa
 Task 012's `.shopee-product-id` remains the only persistent folder ownership marker. Task 013's `product.json` is portable product/output metadata and is never used to adopt an unmarked folder.
 
 Task 013 does not add folder auto-renaming, stale-image deletion, content hashing, exports, a database/global index, a metadata migration framework, or packaging changes.
+
+Task 014 does not add a theme system, localization framework, preferences, previews, notifications, packaging, or UI-owned business state. The queue/item enums and structured download results remain authoritative; table text is presentation only.
