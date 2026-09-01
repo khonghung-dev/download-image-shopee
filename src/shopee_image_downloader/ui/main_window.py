@@ -28,6 +28,7 @@ from shopee_image_downloader.core.batch_queue import (
     QueueState,
     STATUS_DISPLAY_DOWNLOADING,
     STATUS_DISPLAY_NAVIGATING,
+    STATUS_DISPLAY_SKIPPED_DUPLICATE,
     STATUS_DISPLAY_SUCCESS,
     STATUS_DISPLAY_VERIFICATION,
 )
@@ -108,6 +109,9 @@ class MainWindow(QMainWindow):
             self._on_queue_item_download_requested
         )
         self.queue_manager.item_completed.connect(self._on_queue_item_completed)
+        self.queue_manager.item_skipped_duplicate.connect(
+            self._on_queue_item_skipped_duplicate
+        )
         self.queue_manager.item_failed.connect(self._on_queue_item_failed)
         self.queue_manager.verification_required.connect(self._on_queue_verification_required)
         self.queue_manager.progress_updated.connect(self._on_queue_progress_updated)
@@ -449,6 +453,8 @@ class MainWindow(QMainWindow):
         row_idx: int,
         product_data: BridgeProductData,
         status_text: str = STATUS_DISPLAY_SUCCESS,
+        *,
+        bind_product_index: bool = True,
     ) -> None:
         """Update an existing table row with authoritative product data and bind indexes."""
         if row_idx < 0 or row_idx >= self.results_table.rowCount():
@@ -468,7 +474,7 @@ class MainWindow(QMainWindow):
 
         # Bind indexes
         key = product_data.product_key
-        if key:
+        if key and bind_product_index:
             self._rows_by_product_key[key] = row_idx
             self._products_by_product_key[key] = product_data
         if product_data.request_id:
@@ -506,6 +512,19 @@ class MainWindow(QMainWindow):
             status_text=self._download_status_text(product_data),
         )
 
+    def _on_queue_item_skipped_duplicate(
+        self,
+        row_idx: int,
+        product_data: BridgeProductData,
+    ) -> None:
+        """Present a handled duplicate without replacing the successful row index."""
+        self._update_table_row(
+            row_idx,
+            product_data,
+            status_text=STATUS_DISPLAY_SKIPPED_DUPLICATE,
+            bind_product_index=False,
+        )
+
     def _on_queue_item_failed(self, row_idx: int, error_code: str, error_message: str) -> None:
         """Handle item failure from queue manager."""
         status_item = self.results_table.item(row_idx, 2)
@@ -533,10 +552,16 @@ class MainWindow(QMainWindow):
         cancelled_count = sum(
             item.state.value == "CANCELLED" for item in items
         )
+        duplicate_count = sum(
+            item.state.value == "SKIPPED_DUPLICATE" for item in items
+        )
         summary = (
             f"Hoàn tất {len(items)}/{len(items)}: "
-            f"{success_count} thành công, {fail_count} lỗi"
+            f"{success_count} thành công"
         )
+        if duplicate_count:
+            summary += f", {duplicate_count} trùng đã bỏ qua"
+        summary += f", {fail_count} lỗi"
         if cancelled_count:
             summary += f", {cancelled_count} đã hủy"
         self.status_label.setText(summary)

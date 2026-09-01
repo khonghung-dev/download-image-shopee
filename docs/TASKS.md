@@ -35,21 +35,28 @@ This file tracks the current architecture, not superseded implementation generat
 - [x] Task 011: downloader 429 bounded `Retry-After`, bounded 5xx retries, permanent 4xx handling, and no product-level double retry after image failures.
 - [x] Task 011: permanent output/permission/disk-full handling, controlled unexpected worker failure, and cancellation/close-safe retry timers.
 - [x] Task 011: transient/permanent/verification/stale/HTTP/storage/cancellation/multi-product/nine-image regressions.
+- [x] Task 012: canonical `shop_id:item_id` identity shared by the desktop product model, queue, and Product Folder Manager.
+- [x] Task 012: atomic `.shopee-product-id` ownership marker, immediate-child cross-run discovery, changed-title reuse, and conservative symlink/reparse containment.
+- [x] Task 012: safe legacy/corrupt/mismatched marker collisions, same-title/different-product separation, and permanent multiple-claim failure.
+- [x] Task 012: batch-local successful-product registry with terminal `SKIPPED_DUPLICATE`, stable input accounting, and no duplicate download.
+- [x] Task 012: failed/partial results remain retryable by later items; Task 011 transport retries are not duplicates.
+- [x] Task 012: marker-owned complete/partial folders reuse the existing Task 007B downloader and preserve authoritative image lists.
 
 ## Frozen extraction regression
 
 - [x] Known nine-image-plus-one-video product produces nine authoritative images in the automatic flow.
 - [x] The manual extension send uses the same authoritative nine-image result path.
 
-Tasks 007A/007B do not modify the extension, Native Host, gallery traversal, video filtering, or authoritative cache. Task 007B only adds a desktop-only result field to the parsed desktop model.
+Tasks 007A/007B/012 do not modify the extension, Native Host, gallery traversal, video filtering, or authoritative cache. Task 012 is Python desktop identity/filesystem/queue logic only.
 
 ## Planned product work
 
-- [ ] Task 012: replace the provisional folder collision suffix with full duplicate-product handling.
 - [ ] Package and verify the full desktop application distribution.
 
-Task 007A remains the sole owner of directory creation. Task 007B writes only controlled sequential image files inside that validated directory and does not implement broader duplicate-product policy.
+Task 007A's Product Folder Manager remains the sole owner of directory creation and now implements Task 012 marker ownership/reuse. Task 007B writes only controlled sequential image files inside that validated directory; it remains the sole existing-file/partial-download policy.
 
 Task 010 does not change the Chrome Extension, Native Host, extraction protocol, gallery traversal, authoritative cache, Task 007B retry limits, or Task 012 duplicate-product policy.
 
 Task 011 adds automatic retries only for transient product opening/extraction failures. It does not add a manual retry button, rerun completed failed batches, change duplicate-product semantics, modify the extension/native architecture, or retry a whole product after Task 007B returns partial image failures.
+
+Task 012 does not add product metadata JSON, folder auto-renaming, content hashing, a database/global index, automatic legacy migration, or Task 013 metadata. `.shopee-product-id` is a tiny internal ownership marker only.

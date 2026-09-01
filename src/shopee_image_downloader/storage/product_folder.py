@@ -1,10 +1,12 @@
-"""Windows-safe product folder creation within a selected output root."""
+"""Marker-owned product folder resolution below one selected output root."""
 
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 import re
+import uuid
 
 from shopee_image_downloader.core.error_policy import (
     AppError,
@@ -13,10 +15,17 @@ from shopee_image_downloader.core.error_policy import (
     classify_error_code,
     error_from_exception,
 )
+from shopee_image_downloader.core.product_identity import (
+    canonical_product_key,
+    is_canonical_product_key,
+)
 
 logger = logging.getLogger(__name__)
 
 MAX_PRODUCT_FOLDER_NAME_LENGTH: int = 120
+PRODUCT_ID_MARKER_FILENAME: str = ".shopee-product-id"
+_MAX_MARKER_BYTES: int = 128
+_WINDOWS_REPARSE_POINT_ATTRIBUTE: int = 0x400
 
 _INVALID_WINDOWS_RUN = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
 _WHITESPACE_RUN = re.compile(r"\s+")
@@ -92,7 +101,7 @@ def sanitize_product_folder_name(
 
 
 def _collision_name(base_name: str, shop_id: object | None, item_id: object | None) -> str:
-    """Build the provisional identity-suffixed collision component."""
+    """Build the identity-suffixed collision component."""
     identity = f"{_safe_identity_part(shop_id)}-{_safe_identity_part(item_id)}"
     max_identity_length = MAX_PRODUCT_FOLDER_NAME_LENGTH - len("product []")
     identity = identity[:max_identity_length].rstrip(" .") or "unknown"
@@ -100,6 +109,14 @@ def _collision_name(base_name: str, shop_id: object | None, item_id: object | No
     available = MAX_PRODUCT_FOLDER_NAME_LENGTH - len(suffix)
     prefix = base_name[:available].rstrip(" .") or "product"
     return f"{prefix}{suffix}"[:MAX_PRODUCT_FOLDER_NAME_LENGTH].rstrip(" .")
+
+
+def _numbered_collision_name(base_name: str, number: int) -> str:
+    """Return a stable fallback when even the identity suffix is occupied."""
+    suffix = f" ({number})"
+    available = MAX_PRODUCT_FOLDER_NAME_LENGTH - len(suffix)
+    prefix = base_name[:available].rstrip(" .") or "product"
+    return f"{prefix}{suffix}"
 
 
 def _validated_child(root: Path, component: str) -> Path:
@@ -124,17 +141,180 @@ def _validated_child(root: Path, component: str) -> Path:
     return target
 
 
+def _entry_exists(path: Path) -> bool:
+    """Check lexical existence without treating a broken link as available."""
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise ProductFolderError(
+            error_from_exception(
+                exc,
+                stage=ErrorStage.FOLDER,
+                default_code="PRODUCT_FOLDER_ERROR",
+            )
+        ) from exc
+    return True
+
+
+def _is_reparse_point(path: Path) -> bool:
+    """Conservatively recognize symlinks and Windows reparse points."""
+    try:
+        stat_result = path.lstat()
+    except OSError:
+        return True
+    return path.is_symlink() or bool(
+        getattr(stat_result, "st_file_attributes", 0)
+        & _WINDOWS_REPARSE_POINT_ATTRIBUTE
+    )
+
+
+def _read_product_marker(root: Path, child: Path) -> str | None:
+    """Read one fixed-name marker only when containment is provable."""
+    marker = child / PRODUCT_ID_MARKER_FILENAME
+    try:
+        marker.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        logger.warning("Không thể kiểm tra marker sản phẩm %s: %s", marker, exc)
+        return None
+    if _is_reparse_point(marker):
+        logger.warning("Bỏ qua marker reparse/symlink không an toàn: %s", marker)
+        return None
+
+    try:
+        resolved_marker = marker.resolve(strict=True)
+        marker_stat = resolved_marker.stat()
+        if resolved_marker.parent != child or child.parent != root:
+            logger.warning("Bỏ qua marker ngoài biên thư mục đầu ra: %s", marker)
+            return None
+        if not resolved_marker.is_file() or marker_stat.st_size > _MAX_MARKER_BYTES:
+            logger.warning("Marker sản phẩm không hợp lệ: %s", marker)
+            return None
+        marker_text = resolved_marker.read_text(encoding="utf-8")
+        marker_value = (
+            marker_text[:-1] if marker_text.endswith("\n") else marker_text
+        )
+    except (OSError, RuntimeError, UnicodeError) as exc:
+        logger.warning("Không thể đọc marker sản phẩm %s: %s", marker, exc)
+        return None
+
+    if not is_canonical_product_key(marker_value):
+        logger.warning(
+            "Marker sản phẩm rỗng hoặc sai định dạng tại %s: %r",
+            marker,
+            marker_value,
+        )
+        return None
+    return marker_value
+
+
+def _discover_owned_folder(root: Path, product_key: str) -> Path | None:
+    """Find a unique immediate child whose marker claims ``product_key``."""
+    matches: list[Path] = []
+    try:
+        children = sorted(root.iterdir(), key=lambda path: path.name.casefold())
+    except OSError as exc:
+        raise ProductFolderError(
+            error_from_exception(
+                exc,
+                stage=ErrorStage.FOLDER,
+                default_code="PRODUCT_FOLDER_ERROR",
+            )
+        ) from exc
+
+    for child in children:
+        if _is_reparse_point(child):
+            logger.warning("Bỏ qua thư mục reparse/symlink: %s", child)
+            continue
+        try:
+            resolved_child = child.resolve(strict=True)
+            if resolved_child.parent != root or not resolved_child.is_dir():
+                continue
+        except (OSError, RuntimeError):
+            logger.warning("Không thể xác minh thư mục con: %s", child)
+            continue
+        if _read_product_marker(root, resolved_child) == product_key:
+            matches.append(resolved_child)
+
+    if len(matches) > 1:
+        joined = ", ".join(path.name for path in matches)
+        raise ProductFolderError(
+            (
+                "Phát hiện nhiều thư mục cho cùng một sản phẩm. "
+                f"product_key={product_key}; folders={joined}"
+            ),
+            error_code="MULTIPLE_PRODUCT_FOLDERS",
+        )
+    return matches[0] if matches else None
+
+
+def _choose_available_target(
+    root: Path,
+    folder_name: str,
+    shop_id: object,
+    item_id: object,
+) -> Path:
+    """Choose a direct child without adopting any unmarked existing entry."""
+    primary = _validated_child(root, folder_name)
+    if not _entry_exists(primary):
+        return primary
+
+    collision_component = _collision_name(folder_name, shop_id, item_id)
+    collision = _validated_child(root, collision_component)
+    if not _entry_exists(collision):
+        return collision
+
+    number = 2
+    while number <= 10_000:
+        candidate = _validated_child(
+            root,
+            _numbered_collision_name(collision_component, number),
+        )
+        if not _entry_exists(candidate):
+            return candidate
+        number += 1
+    raise ProductFolderError(
+        "Không thể chọn tên thư mục sản phẩm an toàn.",
+        error_code="PRODUCT_FOLDER_ERROR",
+    )
+
+
+def _write_identity_marker_atomic(folder: Path, product_key: str) -> None:
+    """Atomically create the fixed internal identity marker."""
+    marker = folder / PRODUCT_ID_MARKER_FILENAME
+    temporary = folder / (
+        f"{PRODUCT_ID_MARKER_FILENAME}.{uuid.uuid4().hex}.tmp"
+    )
+    resolved_folder = folder.resolve(strict=True)
+    if marker.resolve(strict=False).parent != resolved_folder:
+        raise ProductFolderError(
+            "Đường dẫn marker không nằm trong thư mục sản phẩm.",
+            error_code="PATH_CONTAINMENT_VIOLATION",
+        )
+
+    try:
+        with temporary.open("x", encoding="utf-8", newline="\n") as marker_file:
+            marker_file.write(f"{product_key}\n")
+            marker_file.flush()
+            os.fsync(marker_file.fileno())
+        os.replace(temporary, marker)
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("Không thể xóa marker tạm: %s", temporary)
+
+
 def ensure_product_folder(
     output_root: str | Path | None,
     product_name: object | None,
     shop_id: object | None = None,
     item_id: object | None = None,
 ) -> Path:
-    """Create and return one safe product directory below an existing root.
-
-    Existing primary names use the provisional ``[shop_id-item_id]`` suffix.
-    If that identity-specific directory already exists, it is reused.
-    """
+    """Resolve or create the unique marker-owned folder for one product."""
     if output_root is None or not str(output_root).strip():
         raise ProductFolderError(
             "Chưa chọn thư mục đầu ra.",
@@ -166,33 +346,32 @@ def ensure_product_folder(
             error_code="INVALID_OUTPUT_PATH",
         )
 
-    folder_name = sanitize_product_folder_name(product_name, shop_id, item_id)
-    fallback_name = _fallback_name(shop_id, item_id)
-    primary = _validated_child(root, folder_name)
+    try:
+        product_key = canonical_product_key(shop_id, item_id)
+    except ValueError as exc:
+        raise ProductFolderError(
+            f"Định danh sản phẩm không hợp lệ: {exc}",
+            error_code="INVALID_PRODUCT_ID",
+        ) from exc
 
-    if primary.exists():
-        if not primary.is_dir():
-            raise ProductFolderError(
-                f"Tên thư mục sản phẩm đang bị một tệp chiếm dụng: {primary.name}",
-                error_code="INVALID_OUTPUT_PATH",
-            )
-        if folder_name == fallback_name:
-            return primary
-        target = _validated_child(
-            root,
-            _collision_name(folder_name, shop_id, item_id),
+    existing_owned = _discover_owned_folder(root, product_key)
+    if existing_owned is not None:
+        logger.info(
+            "Tái sử dụng thư mục sản phẩm: product_key=%s folder=%s",
+            product_key,
+            existing_owned,
         )
-    else:
-        target = primary
+        return existing_owned
+
+    folder_name = sanitize_product_folder_name(product_name, shop_id, item_id)
+    target = _choose_available_target(root, folder_name, shop_id, item_id)
 
     try:
         target.mkdir(parents=False, exist_ok=False)
     except FileExistsError as exc:
-        if target.is_dir():
-            return target
         raise ProductFolderError(
-            f"Không thể tạo thư mục vì đường dẫn đã tồn tại: {target}",
-            error_code="INVALID_OUTPUT_PATH",
+            f"Tên thư mục vừa bị chiếm dụng: {target}",
+            error_code="PRODUCT_FOLDER_ERROR",
         ) from exc
     except PermissionError as exc:
         raise ProductFolderError(
@@ -211,5 +390,34 @@ def ensure_product_folder(
             )
         ) from exc
 
-    logger.info("Đã tạo thư mục sản phẩm: %s", target)
+    try:
+        _write_identity_marker_atomic(target, product_key)
+    except ProductFolderError:
+        try:
+            target.rmdir()
+        except OSError:
+            logger.warning(
+                "Không thể dọn thư mục mới sau lỗi marker: %s", target
+            )
+        raise
+    except OSError as exc:
+        try:
+            target.rmdir()
+        except OSError:
+            logger.warning(
+                "Không thể dọn thư mục mới sau lỗi marker: %s", target
+            )
+        raise ProductFolderError(
+            error_from_exception(
+                exc,
+                stage=ErrorStage.FOLDER,
+                default_code="PRODUCT_FOLDER_ERROR",
+            )
+        ) from exc
+
+    logger.info(
+        "Đã tạo thư mục sản phẩm: product_key=%s folder=%s",
+        product_key,
+        target,
+    )
     return target

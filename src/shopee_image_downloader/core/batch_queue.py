@@ -45,6 +45,7 @@ class ItemState(str, Enum):
     CREATING_FOLDER = "CREATING_FOLDER"
     DOWNLOADING = "DOWNLOADING"
     SUCCESS = "SUCCESS"
+    SKIPPED_DUPLICATE = "SKIPPED_DUPLICATE"
     COMPLETED_WITH_ERRORS = "COMPLETED_WITH_ERRORS"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
@@ -53,6 +54,7 @@ class ItemState(str, Enum):
 TERMINAL_ITEM_STATES: frozenset[ItemState] = frozenset(
     {
         ItemState.SUCCESS,
+        ItemState.SKIPPED_DUPLICATE,
         ItemState.COMPLETED_WITH_ERRORS,
         ItemState.FAILED,
         ItemState.CANCELLED,
@@ -68,6 +70,7 @@ _ALLOWED_ITEM_TRANSITIONS: dict[ItemState, frozenset[ItemState]] = {
             ItemState.WAITING_EXTRACTION,
             ItemState.WAITING_RETRY,
             ItemState.CREATING_FOLDER,
+            ItemState.SKIPPED_DUPLICATE,
             ItemState.FAILED,
             ItemState.CANCELLED,
         }
@@ -77,6 +80,7 @@ _ALLOWED_ITEM_TRANSITIONS: dict[ItemState, frozenset[ItemState]] = {
             ItemState.OPENING_PRODUCT,
             ItemState.WAITING_RETRY,
             ItemState.CREATING_FOLDER,
+            ItemState.SKIPPED_DUPLICATE,
             ItemState.FAILED,
             ItemState.CANCELLED,
         }
@@ -104,6 +108,7 @@ _ALLOWED_ITEM_TRANSITIONS: dict[ItemState, frozenset[ItemState]] = {
         }
     ),
     ItemState.SUCCESS: frozenset(),
+    ItemState.SKIPPED_DUPLICATE: frozenset(),
     ItemState.COMPLETED_WITH_ERRORS: frozenset(),
     ItemState.FAILED: frozenset(),
     ItemState.CANCELLED: frozenset(),
@@ -116,6 +121,7 @@ STATUS_DISPLAY_SCANNING: str = "Đang quét toàn bộ ảnh"
 STATUS_DISPLAY_CREATING_FOLDER: str = "Đang tạo thư mục"
 STATUS_DISPLAY_DOWNLOADING: str = "Đang tải ảnh"
 STATUS_DISPLAY_SUCCESS: str = "Đã tải ảnh"
+STATUS_DISPLAY_SKIPPED_DUPLICATE: str = "Trùng - đã bỏ qua"
 STATUS_DISPLAY_VERIFICATION: str = "Shopee yêu cầu xác minh"
 STATUS_DISPLAY_TIMEOUT: str = "Hết thời gian chờ Shopee."
 STATUS_DISPLAY_FAILED: str = "Không thể tải trang"
@@ -159,6 +165,7 @@ class BatchQueueManager(QObject):
     item_progress = Signal(int, str, str)  # row, stage, display text
     item_download_requested = Signal(int, object)  # row, extracted product
     item_completed = Signal(int, object)  # row, completed product
+    item_skipped_duplicate = Signal(int, object)  # row, reused product
     item_failed = Signal(int, str, str)  # row, error code, message
     verification_required = Signal(int, str, str)
     progress_updated = Signal(int, int)  # finalized, total
@@ -180,6 +187,7 @@ class BatchQueueManager(QObject):
         self._items: list[QueueItem] = []
         self._current_index = -1
         self._known_request_ids: set[str] = set()
+        self._reusable_products_by_key: dict[str, BridgeProductData] = {}
 
         self._timeout_timer = QTimer(self)
         self._timeout_timer.setSingleShot(True)
@@ -249,6 +257,12 @@ class BatchQueueManager(QObject):
         """Return product-level failures, excluding cancellation."""
         return sum(item.state == ItemState.FAILED for item in self._items)
 
+    def get_duplicate_count(self) -> int:
+        """Return same-batch inputs handled by a prior successful product."""
+        return sum(
+            item.state == ItemState.SKIPPED_DUPLICATE for item in self._items
+        )
+
     def get_cancelled_count(self) -> int:
         """Return cancelled current and pending items."""
         return sum(item.state == ItemState.CANCELLED for item in self._items)
@@ -301,6 +315,7 @@ class BatchQueueManager(QObject):
             self._known_request_ids.add(request_id)
 
         self._items = new_items
+        self._reusable_products_by_key.clear()
         self._current_index = 0
         self._set_state(QueueState.RUNNING)
         self.progress_updated.emit(0, len(self._items))
@@ -447,7 +462,42 @@ class BatchQueueManager(QObject):
             )
             return
 
+        try:
+            product_key = product_data.product_key
+        except ValueError as exc:
+            self.handle_process_error(
+                item.request_id,
+                item.input_url,
+                "MALFORMED_PRODUCT_RESULT",
+                str(exc),
+            )
+            return
+
         self._timeout_timer.stop()
+        reusable = self._reusable_products_by_key.get(product_key)
+        if reusable is not None:
+            if not self._transition_item(item, ItemState.SKIPPED_DUPLICATE):
+                return
+            item.stage = "skipped_duplicate"
+            item.product_data = replace(
+                product_data,
+                images=list(product_data.images),
+                product_folder=reusable.product_folder,
+                download_result=reusable.download_result,
+            )
+            logger.info(
+                "Bỏ qua sản phẩm trùng trong batch: req=%s product=%s folder=%s",
+                item.request_id,
+                product_key,
+                reusable.product_folder,
+            )
+            self.item_skipped_duplicate.emit(item.row_idx, item.product_data)
+            self.progress_updated.emit(
+                self.get_finished_count(), len(self._items)
+            )
+            self._advance_queue(item.request_id)
+            return
+
         if not self._transition_item(item, ItemState.CREATING_FOLDER):
             return
 
@@ -570,6 +620,10 @@ class BatchQueueManager(QObject):
             product_data,
             images=list(product_data.images),
         )
+        if new_state == ItemState.SUCCESS:
+            self._reusable_products_by_key[
+                item.product_data.product_key
+            ] = item.product_data
         self.item_completed.emit(item.row_idx, item.product_data)
         self.progress_updated.emit(self.get_finished_count(), len(self._items))
         self._advance_queue(item.request_id)
@@ -927,8 +981,10 @@ class BatchQueueManager(QObject):
         success_count = self.get_success_count()
         fail_count = self.get_fail_count()
         logger.info(
-            "Hoàn tất batch: %d thành công, %d thất bại, %d đã hủy / %d",
+            "Hoàn tất batch: %d thành công, %d trùng, %d thất bại, "
+            "%d đã hủy / %d",
             success_count,
+            self.get_duplicate_count(),
             fail_count,
             self.get_cancelled_count(),
             len(self._items),

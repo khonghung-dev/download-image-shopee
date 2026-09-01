@@ -15,10 +15,11 @@ The suite is offline and protects the current architecture rather than deleted i
 | `test_native_messaging.py` | Four-byte framing, host manifest, offline/online relay, payload preservation |
 | `test_extension_extractor.py` | Real JavaScript extractor behavior, service-worker state, worker tab, canonical sender, architecture boundaries |
 | `test_ui.py` | Current widgets, start guard, queue/bridge integration, single row updates, manual deduplication |
-| `test_product_folder.py` | Unicode/Windows sanitization, device names, fallback and length policy, containment, output-root failures, and provisional collisions |
+| `test_product_folder.py` | Unicode/Windows sanitization, device names, fallback and length policy, containment, output-root failures, and identity-suffixed collisions |
 | `test_image_downloader.py` | Ordered filenames, MIME extensions, bounded retries/timeouts, invalid responses, atomic cleanup, existing-file skip, nine-image model integration, cancellation, and QThread execution |
 | `test_task_010_batch_reliability.py` | 10-item FIFO execution, middle-stage failure continuation, stale extraction/worker events, double start, cancellation terminalization, product isolation, GUI responsiveness, worker cleanup, and close-during-download |
 | `test_task_011_error_retry.py` | Canonical classification, product retry/exhaustion, verification, stale attempt generations, 429/4xx/5xx policy, permission/disk full, cancellation/close backoff safety, multi-product totals, and nine-image preservation |
+| `test_task_012_duplicate_handling.py` | Canonical product keys, atomic markers, cross-run reuse/collisions, duplicate claims, same-batch skip, failure/retry distinctions, partial/complete reuse, zero-byte replacement, and image preservation |
 
 Deleted Playwright authentication, Python metadata-extractor, URL-resolver, and workaround-protocol tests are not part of the active suite.
 
@@ -62,8 +63,12 @@ JavaScript syntax checks require Node.js and are invoked by `test_extension_extr
 - Whitespace is collapsed while Vietnamese/Unicode text remains unchanged.
 - Trailing dots/spaces, reserved device basenames, empty titles, and overlong titles are made safe deterministically.
 - Path-like titles remain a single component whose resolved target is a direct child of the selected existing output root.
-- A primary-name collision uses `<name> [<shop_id>-<item_id>]` without overwriting the existing directory.
-- Task 007A unit tests still create directories only. Task 007B integration tests write controlled image files only inside those directories.
+- Every newly managed folder receives an atomic `.shopee-product-id` marker containing only `shop_id:item_id`.
+- A unique marker-owned folder is reused even when the incoming title changes; it is not renamed.
+- An unmarked, corrupt-marker, or mismatched-marker title collision is preserved and uses `<name> [<shop_id>-<item_id>]` rather than being adopted.
+- Equal titles with different product keys remain separate, while multiple valid folders claiming one key fail without modification.
+- Discovery is limited to immediate output-root children and unsafe symlink/reparse containment is never used as a managed product folder.
+- Task 007A/012 storage tests create only managed directories and their identity markers. Task 007B integration tests write controlled image files only inside those directories.
 
 ## Task 007B downloader regressions
 
@@ -106,5 +111,19 @@ Task 010 tests use synthetic models, test doubles, and local filesystem paths on
 - A nine-image authoritative list remains unchanged through a product retry and entry into the folder/download pipeline.
 
 Task 011 tests are offline and use Qt timers, scripted HTTP responses, injected timing, and temporary local folders. Product-level automatic retry stops before folder creation; image-level retry remains owned solely by Task 007B.
+
+## Task 012 identity/reuse regressions
+
+- Exact duplicate URL lines remain first-seen deduplicated by `parse_url_lines()` before queue creation; Task 012 does not move or change that rule.
+- Different accepted URLs resolving to one canonical `shop_id:item_id` retain two queue items: the first fully succeeds and the second reaches terminal `SKIPPED_DUPLICATE` without a second worker/download.
+- Terminal duplicate items count toward overall `finished / total`, have no retry policy, and are shown separately in the final summary.
+- A failed or partial first item does not make a later same-key item reusable.
+- A Task 011 retry changes `request_id` for the same logical item and succeeds normally; it is not `SKIPPED_DUPLICATE`.
+- Cross-run marker reuse always invokes the current Task 007B downloader. Complete existing files are preserved/skipped, partial folders complete missing files, zero-byte targets are replaced, and `.part` cleanup remains centralized.
+- Folder discovery uses only `.shopee-product-id`; titles, input URLs, image URLs, image counts, filenames, and folder names are never identity evidence.
+- The nine-image authoritative list remains nine entries after same-batch resolution, marker reuse, and download completion.
+- Manual Extension → Desktop sends still update by product key and reuse the marker-owned folder without changing automatic queue state.
+
+`.shopee-product-id` is an internal identity/ownership marker, not the future Task 013 product metadata file. Task 012 tests do not implement or expect metadata JSON, folder renaming, hashing, migration, or a database.
 
 Do not weaken extraction tests to make a failing implementation appear green. Record pre-existing failures separately from cleanup-introduced failures.

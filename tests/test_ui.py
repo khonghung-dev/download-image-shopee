@@ -35,6 +35,7 @@ from shopee_image_downloader.core.image_downloader import (
 )
 from shopee_image_downloader.storage.settings import SettingsManager
 from shopee_image_downloader.storage.product_folder import (
+    PRODUCT_ID_MARKER_FILENAME,
     ProductFolderError,
     ensure_product_folder,
 )
@@ -54,11 +55,16 @@ class ImmediateImageDownloadController(QObject):
     cancelled = Signal(object)
     idle = Signal()
 
+    def __init__(self) -> None:
+        super().__init__()
+        self.start_calls: list[str] = []
+
     @property
     def is_busy(self) -> bool:
         return False
 
     def start(self, product_data: BridgeProductData, output_root: str) -> bool:
+        self.start_calls.append(product_data.product_key)
         try:
             folder = ensure_product_folder(
                 output_root,
@@ -449,6 +455,49 @@ def test_manual_product_reception_deduplicates_by_product_key(tmp_path: Path) ->
     assert window.results_table.item(0, 1).text() == "Product v2"
     assert window.results_table.item(0, 3).text() == "3"
     assert window.results_table.item(1, 1).text() == "Different product"
+    output_folders = sorted(
+        path.name for path in (tmp_path / "output").iterdir() if path.is_dir()
+    )
+    assert output_folders == ["Different product", "Product v1"]
+    window.close()
+
+
+def test_same_batch_product_duplicate_is_terminal_without_second_download(
+    tmp_path: Path,
+) -> None:
+    controller = ImmediateImageDownloadController()
+    window, _, _ = _create_window(
+        tmp_path,
+        connected=True,
+        with_output_folder=True,
+        image_download_controller=controller,
+    )
+    window.url_input.setPlainText(
+        "https://shopee.vn/normal-product\n"
+        "https://s.shopee.vn/alternative-product"
+    )
+    window.start_button.click()
+
+    first_request = window.queue_manager.current_item.request_id
+    window._on_bridge_product_received(
+        _product(request_id=first_request, name="Original title")
+    )
+    second_request = window.queue_manager.current_item.request_id
+    window._on_bridge_product_received(
+        _product(request_id=second_request, name="Alternative title")
+    )
+
+    assert controller.start_calls == ["1001:2001"]
+    assert window.results_table.item(0, 2).text() == "Đã tải 2/2 ảnh"
+    assert window.results_table.item(1, 2).text() == "Trùng - đã bỏ qua"
+    assert window._rows_by_product_key["1001:2001"] == 0
+    assert window.progress_bar.value() == 100
+    assert window.status_label.text() == (
+        "Hoàn tất 2/2: 1 thành công, 1 trùng đã bỏ qua, 0 lỗi"
+    )
+    assert len(
+        [path for path in (tmp_path / "output").iterdir() if path.is_dir()]
+    ) == 1
     window.close()
 
 
@@ -531,7 +580,8 @@ def test_product_success_downloads_into_task_007a_folder_and_stores_result(
     assert stored.product_folder == tmp_path / "output" / product.product_name
     assert stored.product_folder.is_dir()
     assert [path.name for path in sorted(stored.product_folder.iterdir())] == [
-        f"{index:02d}.jpg" for index in range(1, 10)
+        PRODUCT_ID_MARKER_FILENAME,
+        *[f"{index:02d}.jpg" for index in range(1, 10)],
     ]
     assert len(stored.images) == 9
     assert stored.images == product.images

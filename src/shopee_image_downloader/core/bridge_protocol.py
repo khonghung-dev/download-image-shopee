@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from shopee_image_downloader.core.image_downloader import ProductDownloadResult
+from shopee_image_downloader.core.product_identity import canonical_product_key
 
 logger = logging.getLogger(__name__)
 
@@ -53,8 +54,8 @@ class BridgeProductData:
 
     @property
     def product_key(self) -> str:
-        """Return canonical deduplication key for this product listing."""
-        return f"{self.shop_id}:{self.item_id}"
+        """Return the canonical persistent identity for this product."""
+        return canonical_product_key(self.shop_id, self.item_id)
 
 
 def create_hello_ack_message(protocol_version: int = PROTOCOL_VERSION) -> str:
@@ -217,6 +218,10 @@ def validate_incoming_message(
             return False, None, "Trường 'shop_id' không hợp lệ hoặc bị thiếu"
         if item_id is None or str(item_id).strip() in ("", "N/A"):
             return False, None, "Trường 'item_id' không hợp lệ hoặc bị thiếu"
+        try:
+            canonical_product_key(shop_id, item_id)
+        except ValueError:
+            return False, None, "shop_id/item_id không phải định danh Shopee hợp lệ"
         if not isinstance(images, list):
             return False, None, "Trường 'images' phải là danh sách (list)"
 

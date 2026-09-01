@@ -41,13 +41,14 @@ When the user pastes URLs and clicks **Bắt đầu tải ảnh**, the exact cal
 13. `background.js` correlates the worker tab, product key, and request ID, then calls the only final-result builder, `sendCompleteProductToDesktop()`.
 14. The `product_result` crosses Native Messaging, the Native Host WebSocket relay, `ExtensionBridgeServer._on_text_message()`, and `parse_bridge_product_data()`.
 15. `MainWindow._on_bridge_product_received()` routes every session-known `request_id` to `BatchQueueManager`; stale, missing, or mismatched IDs cannot enter the batch pipeline.
-16. The queue validates the authoritative image count, snapshots the product image list, enters `CREATING_FOLDER`, and emits one worker-pipeline request without advancing.
-17. `ImageDownloadController` moves an `ImageDownloadWorker` to a dedicated `QThread`. In that thread, the desktop-owned Product Folder Manager creates the safe child directory under the selected output root.
-18. The worker attaches the resulting `Path` to `BridgeProductData.product_folder` without changing the authoritative name, IDs, or image list. Its correlated `folder_ready` event moves the queue to `DOWNLOADING`.
-19. In the same worker thread, `ImageDownloader` receives `product.images` unchanged and in order and writes only below that exact `product.product_folder`.
-20. Correlated worker progress updates the table status (`Đang tải ảnh n/total`). Overall batch progress remains based only on terminal queue items.
-21. The worker stores its terminal outcome, requests `QThread` shutdown, and the controller clears its worker/thread ownership before publishing `finished`, `failed`, or `cancelled` to the UI.
-22. `BatchQueueManager.handle_download_result()` validates the request ID, product key, product name, image list, product folder, ordered per-image results, and totals. It marks the item `SUCCESS` or `COMPLETED_WITH_ERRORS`, then and only then advances to the next product. Controlled folder/downloader failures mark only that item `FAILED` and continue.
+16. The queue validates the authoritative image count and canonical `product_key` (`shop_id:item_id`). If another distinct queue item already completed that key successfully in the current batch, the later item becomes terminal `SKIPPED_DUPLICATE`, reuses the successful result/folder reference, and starts no worker. Failed or partial earlier items are not reusable.
+17. A non-duplicate item snapshots the product image list, enters `CREATING_FOLDER`, and emits one worker-pipeline request without advancing.
+18. `ImageDownloadController` moves an `ImageDownloadWorker` to a dedicated `QThread`. In that thread, the desktop-owned Product Folder Manager scans only immediate output-root children for `.shopee-product-id`, reuses one exact marker-owned directory, or creates a safe child and atomically writes its marker before publishing it.
+19. The worker attaches the resulting `Path` to `BridgeProductData.product_folder` without changing the authoritative name, IDs, or image list. Its correlated `folder_ready` event moves the queue to `DOWNLOADING`.
+20. In the same worker thread, `ImageDownloader` receives `product.images` unchanged and in order and writes only below that exact `product.product_folder`.
+21. Correlated worker progress updates the table status (`Đang tải ảnh n/total`). Overall batch progress remains based only on terminal queue items.
+22. The worker stores its terminal outcome, requests `QThread` shutdown, and the controller clears its worker/thread ownership before publishing `finished`, `failed`, or `cancelled` to the UI.
+23. `BatchQueueManager.handle_download_result()` validates the request ID, product key, product name, image list, product folder, ordered per-image results, and totals. It marks the item `SUCCESS` or `COMPLETED_WITH_ERRORS`, then and only then advances to the next product. Controlled folder/downloader failures mark only that item `FAILED` and continue.
 
 This is the single automatic batch flow. There is no `process_url` alias and no polling-based `RUN_FULL_SCAN` path.
 
@@ -68,10 +69,10 @@ This is the single automatic batch flow. There is no `process_url` alias and no 
 | Component | Owns | Must not own |
 |---|---|---|
 | `MainWindow` | User input, folder selection, result presentation, signal wiring, desktop result/download orchestration | Shopee extraction, path-sanitization rules, blocking network calls |
-| `BatchQueueManager` | FIFO state, transition guards, request/product/folder correlation, extraction timeout, progress, verification pause/resume, cancellation | Browser/tab control, DOM extraction, filesystem/network work |
+| `BatchQueueManager` | FIFO state, transition guards, request/product/folder correlation, same-batch successful-product registry, extraction timeout, progress, verification pause/resume, cancellation | Browser/tab control, DOM extraction, filesystem/network work |
 | `core/image_downloader.py` | Ordered image HTTP requests, MIME/extension choice, bounded retry/timeout, atomic file commits, per-image/product results | Shopee discovery or extraction, Qt/UI state, product folder creation |
 | `workers/image_download_worker.py` | One-product-at-a-time folder/download `QThread`, correlated progress/outcome context, cooperative cancellation, exact cleanup | Filename/MIME/retry policy, extraction |
-| `storage/product_folder.py` | Windows-safe product folder naming, collision suffix, output-root validation and containment | Image downloading, duplicate-product semantics, UI presentation |
+| `storage/product_folder.py` | Windows-safe naming, canonical marker discovery/creation, collision policy, output-root validation and containment | Image downloading, same-batch queue semantics, UI presentation |
 | `ExtensionBridgeServer` | Loopback WebSocket lifecycle, inbound validation, Qt signals | Shopee business extraction |
 | Native Host | Native Messaging framing and localhost relay | Product construction, extraction, queue policy |
 | `background.js` | Native connection, worker tab, correlation, timeout, canonical outbound product message | DOM/gallery extraction |
@@ -118,6 +119,9 @@ PENDING
   → DOWNLOADING
   → SUCCESS | COMPLETED_WITH_ERRORS
 
+OPENING_PRODUCT | WAITING_EXTRACTION
+  → SKIPPED_DUPLICATE (a different queue item already succeeded for this product_key)
+
 Any active state → FAILED
 Any non-terminal state during cancellation → CANCELLED
 ```
@@ -126,7 +130,7 @@ The queue has at most one current product. Product B's `open_product` is emitted
 
 `request_id` is mandatory for batch `product_result` events. Extraction progress and errors require the current request ID. Each automatic product retry creates a new transport request ID while retaining the same `QueueItem`, input URL, row, and ordering. The prior IDs remain session-known but no longer current, so late progress, errors, or results from an earlier attempt are ignored rather than completing a newer attempt or being reinterpreted as a manual send. Folder readiness, download progress, failure, cancellation, and completion additionally match product identity and the authoritative image list; download-phase events also match the exact product folder.
 
-Overall progress is `terminal items / total items`. Terminal items are `SUCCESS`, `COMPLETED_WITH_ERRORS`, `FAILED`, and `CANCELLED`; a currently downloading product does not increment it. Current-product progress is kept separately in its table row as `Đang tải ảnh n/total`. Final summaries derive success, failure, and cancellation counts from the terminal item states.
+Overall progress is `terminal items / total items`. Terminal items are `SUCCESS`, `SKIPPED_DUPLICATE`, `COMPLETED_WITH_ERRORS`, `FAILED`, and `CANCELLED`; a currently downloading product does not increment it. Current-product progress is kept separately in its table row as `Đang tải ảnh n/total`. Final summaries derive downloaded-success, duplicate, failure, and cancellation counts from the terminal item states.
 
 Cancellation changes the queue to `CANCELLING`, prevents any new `open_product`, sends the existing Chrome cancellation message, and cooperatively signals an active worker. Pending inputs are marked `CANCELLED`. If extraction is still pending, the queue finalizes immediately and rejects later results. If a folder/download worker is active, batch completion waits for the worker's clean exit. The downloader checks cancellation between images and chunks, removes current `.part` files, and retains completed images.
 
@@ -146,7 +150,11 @@ User-facing mappings include `Không tìm thấy sản phẩm.`, `Hết thời g
 
 ## Storage, downloader policy, and concurrency
 
-`SettingsManager` persists only the selected output folder. `storage/product_folder.py` creates exactly one direct child for each successful item. It preserves Unicode, replaces Windows-invalid characters and ASCII controls, normalizes whitespace, protects reserved device names, falls back to `product_<shop_id>_<item_id>`, limits the component to 120 characters, and verifies resolved-path containment. If the primary title directory exists, the provisional Task 007A collision form is `<title> [<shop_id>-<item_id>]`; full duplicate semantics remain deferred to Task 012.
+`SettingsManager` persists only the selected output folder. `storage/product_folder.py` resolves exactly one managed direct child by canonical `product_key = shop_id:item_id`. It preserves Unicode, replaces Windows-invalid characters and ASCII controls, normalizes whitespace, protects reserved device names, falls back to `product_<shop_id>_<item_id>`, limits the component to 120 characters, and verifies resolved-path containment.
+
+The internal marker is always `<product_folder>/.shopee-product-id` and contains only the canonical key as UTF-8 text. New-folder creation commits it atomically through a same-directory temporary file and `replace`; marker failure stops the folder stage before image download. Discovery scans immediate output-root children only, rejects unsafe symlink/reparse containment, and reuses a directory only for an exact valid marker match. A changed title never renames a marker-owned folder.
+
+An unmarked legacy directory, corrupt marker, or marker belonging to another product is ownership-unknown and is never adopted or overwritten. The manager preserves it and uses `<title> [<shop_id>-<item_id>]` (with a deterministic numbered fallback if that path is also occupied). Thus equal titles with different keys remain separate. If multiple immediate children validly claim one key, folder resolution fails permanently with `MULTIPLE_PRODUCT_FOLDERS` and modifies neither directory. `.shopee-product-id` is solely an internal identity/ownership marker; it is not the future Task 013 product metadata file.
 
 Task 007B accepts exactly `BridgeProductData.images`; it never discovers, filters, sorts, or re-extracts media. The only destination is the existing validated `BridgeProductData.product_folder` created by Task 007A. Controlled filenames use the one-based input index with `max(2, digits(total))` padding (`01`, `09`, `001`, `120`). URL path fragments never become filenames.
 
@@ -154,11 +162,21 @@ The response `Content-Type` selects `.jpg`, `.png`, `.webp`, `.gif`, `.bmp`, `.t
 
 Every request uses minimal `User-Agent` and `Accept: image/*` headers. Central defaults are a 10-second connect bound, 15-second read bound, 30-second overall attempt bound, three total attempts, and 0.25/0.5-second bounded backoff. Timeouts, connection failures, HTTP 429, and HTTP 5xx are retryable; HTTP 400/401/403/404 and other non-429 4xx responses, invalid media responses, permission failures, and disk-full writes are not. A valid HTTP 429 `Retry-After` delta/date is respected but clamped to 30 seconds; otherwise normal backoff applies.
 
-Each transfer writes `<sequential-name>.<ext>.part`, flushes and closes it, then atomically replaces an empty/missing final path. Handled failures and cancellation remove the current `.part`. A non-empty exact target is preserved and reported as `SKIPPED_EXISTING`; broader duplicate/re-download policy remains Task 012.
+Each transfer writes `<sequential-name>.<ext>.part`, flushes and closes it, then atomically replaces an empty/missing final path. Handled failures and cancellation remove the current `.part`. A non-empty exact target is preserved and reported as `SKIPPED_EXISTING`; the queue/storage layers own Task 012 product-level identity and reuse decisions.
+
+Cross-run marker reuse still invokes this one downloader. Therefore a complete historical folder preserves valid existing targets as `SKIPPED_EXISTING`, while a partial folder preserves those targets and completes missing or zero-byte targets under the existing MIME/filename policy. Image count, title, folder name, URL equality, and image URL equality never establish product identity.
 
 `ProductDownloadResult` stores `total`, `successful`, `failed`, `skipped`, and ordered per-image results (`index`, `source_url`, `target_path`, `status`, `attempts`, `error`) on the existing product model. One failed image leaves prior valid files in place and produces `COMPLETED_WITH_ERRORS`; it does not abort the remaining image URLs or the following product.
 
 Product-folder creation and the blocking standard-library HTTP/file loop run only inside `ImageDownloadWorker` on a dedicated `QThread`. Products remain sequential: extraction A → folder A → all downloads A → worker cleanup A → terminal item A → extraction B. Image backoff remains in that worker thread; product backoff is event-driven on the Qt GUI loop and never sleeps it. Permission/disk-full failures stop the current product write loop, retain completed files, and continue the batch safely. The Qt GUI thread performs only validation, orchestration, and presentation.
+
+## Task 012 identity and duplicate policy
+
+`request_id` and `product_key` remain different identities. A request ID belongs to one transport attempt; an automatic Task 011 retry generates another request ID for the same logical queue item. A product key is persistent Shopee identity. Retrying an item is never classified as a duplicate.
+
+The queue keeps one batch-local registry containing only fully successful, reusable product results. A later distinct input resolving to the same key becomes `SKIPPED_DUPLICATE`, retains its own queue row/request accounting, reuses the successful folder/result reference, and starts no second download. `FAILED` and `COMPLETED_WITH_ERRORS` results do not enter that registry, so a later item may process normally. Cross-run discovery is intentionally different: finding a marker-owned folder reuses the folder but invokes the downloader so incomplete historical downloads can heal.
+
+Manual Extension → Desktop sends continue to update table rows by product key and use the same Product Folder Manager and downloader. They do not mutate an active automatic queue and do not create a second marker-owned folder for an existing product.
 
 ## Required generated runtime artifact
 

@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added a dedicated Qt worker/controller so image network transfers run outside the GUI thread and the batch queue waits for downloads before advancing.
 - Added Task 010's guarded product lifecycle, terminal-state progress, cancellation counts, stale-event regressions, and 10-product reliability coverage.
 - Added Task 011's canonical error taxonomy, staged diagnostics, bounded product extraction retry, request-generation correlation, and retry/cancellation regressions.
+- Added Task 012's canonical product identity, atomic `.shopee-product-id` ownership marker, cross-run folder reuse, and same-batch `SKIPPED_DUPLICATE` state.
 
 ### Changed
 - Consolidated the runtime around PySide6 → localhost WebSocket → Native Host → Chrome Native Messaging → service worker → content script → `extractor_core.js`.
@@ -23,19 +24,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Correlated download callbacks by request ID, product identity, authoritative image list, and product folder before they can update or finalize a queue item.
 - Centralized transient/permanent/user-action/cancelled/internal classification; product extraction now uses three attempts with non-blocking one/two-second backoff while image retry remains worker-owned.
 - Added bounded HTTP 429 `Retry-After` handling and permanent permission/disk-full write failures without deleting completed images.
+- Made marker-owned folders stable across title changes, kept unmarked/corrupt/mismatched folders untouched, and reused Task 007B to complete partial historical downloads.
 
 ### Fixed
 - Restored manual Chrome Extension full-gallery traversal by waiting for ordered carousel media identities to advance, excluding video media, and refusing to promote a visible-only four-image window to `COMPLETE`.
 - Prevented duplicate dispatch/advance, stale callbacks completing the next product, cancellation being counted as failure, pending items remaining non-terminal after cancellation, and application close destroying an active QThread.
 - Prevented late results/errors from earlier product attempts, retry timers firing after cancellation/close, and product-level retry multiplying Task 007B image retries.
+- Prevented different URLs for one successful product from creating/downloading twice, without treating failed products or Task 011 retry attempts as duplicates.
 
 ### Removed
 - Removed the unused Python browser-session, authentication, URL-resolver, metadata-extractor, and associated worker implementations.
 - Removed legacy browser-automation tests and stale architecture specifications.
 - Removed direct-extension WebSocket remnants, duplicate batch protocol aliases, popup extraction fallback, and obsolete message listeners.
-
-### Known
-- Full duplicate/re-download semantics remain deferred to Task 012; Task 007B preserves a non-empty exact target and reports `SKIPPED_EXISTING`.
 
 ## [0.1.0] - 2026-08-30
 
