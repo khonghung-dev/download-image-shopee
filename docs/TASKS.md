@@ -61,13 +61,21 @@ This file tracks the current architecture, not superseded implementation generat
 - [x] Task 015B: bounded four-way image concurrency inside one product while products remain strictly sequential; authoritative index/filename/result order, pause drain, cancellation cleanup, and per-image fault isolation are preserved.
 - [x] Task 015B: no headless/zero-tab rewrite, no extractor/content/popup-controller/native-host/manifest behavior change, no new automation dependencies, and no executable build.
 - [x] Task 015B: untouched baseline 280 passed, 0 failed, 0 skipped in 49.39 seconds; final offline suite 307 passed, 0 failed, 0 skipped in 32.59 seconds. Live acceptance remains manual.
+- [x] Task 015C: replace the monolithic hard-coded desktop stylesheet with one semantic `DARK`/`LIGHT` theme module, transparent normal labels, complete widget/table/scrollbar states, and theme-aware status tones.
+- [x] Task 015C: add a compact live header toggle and persist only `appearance/theme` through `QSettings`, defaulting invalid/missing values to `DARK` without changing active batch state or UI data.
+- [x] Task 015C: no extension, extractor-core, content extraction, popup, Native Host, downloader, retry, folder-identity, metadata-schema, URL-editor behavior, or executable-build change. Live Chrome/Shopee acceptance remains manual.
+- [x] Task 015C: untouched baseline 307 passed, 0 failed, 0 skipped in 24.96 seconds; final clean offline suite 312 passed, 0 failed, 0 skipped in 38.49 seconds.
+- [x] Task 016A: add one public MV3 manifest key and derive stable Extension ID `bhbnfalghoklngoohdpnjedcdcplbjhm` independently of the unpacked folder path.
+- [x] Task 016A: derive/validate the one exact Native Messaging origin, remove the historical runtime ID, and fail tests/builds on key/allowlist drift without bundling a private key.
+- [x] Task 016: build the Desktop as PyInstaller ONEDIR plus a fresh Native Host EXE; assemble self-locating current-user install/uninstall scripts, keyed Extension source, Vietnamese README, security/portability audits, and `ShopeeImageDownloader-Windows.zip`.
+- [x] Task 016A/016 automated gates: untouched baseline 311 passed; final source suite 316 passed, 0 failed, 0 skipped; packaged Desktop launch and packaged Native Host handshake pass; exact HKCU registration passes.
 
 ## Frozen extraction regression
 
 - [x] Known nine-image-plus-one-video product produces nine authoritative images in the automatic flow.
 - [x] The manual extension send uses the same authoritative nine-image result path.
 
-Tasks 007A/007B/012/013/014/015 do not modify the extension, Native Host, gallery traversal, video filtering, or authoritative cache. Task 013 is Python desktop metadata serialization and worker-lifecycle integration only; Task 014 is desktop presentation and existing-progress signal exposure only. Task 015 changes only desktop folder path hardening demonstrated by a Windows stress failure, plus tests and reliability documentation. Task 015B changes `background.js` only for the aligned timeout and verification timer/state handling, and changes `popup.html` only for presentation; `extractor_core.js`, `content.js`, `popup.js`, `manifest.json`, and the Native Host remain frozen.
+Tasks 007A/007B/012/013/014/015 do not modify the extension, Native Host, gallery traversal, video filtering, or authoritative cache. Task 013 is Python desktop metadata serialization and worker-lifecycle integration only; Task 014 is desktop presentation and existing-progress signal exposure only. Task 015 changes only desktop folder path hardening demonstrated by a Windows stress failure, plus tests and reliability documentation. Task 015B changes `background.js` only for the aligned timeout and verification timer/state handling, and changes `popup.html` only for presentation; `extractor_core.js`, `content.js`, `popup.js`, `manifest.json`, and the Native Host remain frozen. Task 015C changes only desktop presentation and theme persistence.
 
 ## Planned product work
 
@@ -83,8 +91,12 @@ Task 015B makes Task 012's `.shopee-product-id` optional and adds a small app-lo
 
 Task 013/015B does not add folder auto-renaming, stale-image deletion, content hashing, a content catalog, metadata migration framework, or packaging changes. The Task 015B registry stores only normalized output-root/product-key-to-relative-folder mappings.
 
-Task 014 does not add a theme system, localization framework, preferences, previews, notifications, packaging, or UI-owned business state. The queue/item enums and structured download results remain authoritative; table text is presentation only.
+Task 014 did not add a theme system. Task 015C adds only the presentation-owned dark/light theme preference; it does not add localization, previews, notifications, packaging, or UI-owned business state. The queue/item enums and structured download results remain authoritative; table text is presentation only.
 
 Task 015 adds no features and performs no packaging. Its evidence matrix is `docs/TASK_015_RELIABILITY_MATRIX.md`; its developer-run live checklist is `docs/TASK_015_MANUAL_SOAK.md`.
 
 Task 015B's live nine-image flow, actual failing-product timing, and 30-product soak remain developer-run manual acceptance gates. Automated tests do not access Shopee or personal Chrome profiles.
+
+Task 015C's live Light/Dark theme checks remain developer-run manual acceptance gates. Automated tests mock Qt state and never inspect personal browser data.
+
+Task 016's final Chrome/Shopee acceptance remains manual: reload the unpacked keyed Extension once, verify the displayed ID, connect it to the registered release Native Host, and run the known 9-image, pause/resume, verification, failing-product continuation, duplicate/cross-run, and second-batch checks from the packaged Desktop.

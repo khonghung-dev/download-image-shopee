@@ -24,10 +24,12 @@ The extension does not request cookies, history, debugger, or broad all-site acc
 
 1. Open `chrome://extensions`.
 2. Enable Developer mode.
-3. Choose **Load unpacked**.
-4. Select `D:\download-picture-shopee\chrome_extension`.
+3. Remove or reload the older development extension if Chrome still shows it.
+4. Choose **Load unpacked**.
+5. Select the bundled or repository `chrome_extension` folder.
+6. Verify that Chrome displays extension ID `bhbnfalghoklngoohdpnjedcdcplbjhm`.
 
-The checked-in Native Messaging manifests allow only extension ID `kjkgdknadhnpigglcpjbgkkbcngclhgf`. Follow [../native_host/README.md](../native_host/README.md) to install the host for that extension.
+The public `key` in `manifest.json` establishes this stable ID independently of the folder path. The Native Messaging manifest allows only `chrome-extension://bhbnfalghoklngoohdpnjedcdcplbjhm/`. Follow [../native_host/README.md](../native_host/README.md) to install the host after loading the keyed extension.
 
 ## Manual flow
 

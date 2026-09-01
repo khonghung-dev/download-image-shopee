@@ -2,7 +2,7 @@
 
 Shopee Image Downloader is a Windows PySide6 desktop application paired with a Manifest V3 Chrome extension. The desktop accepts multiple Shopee URLs and runs them sequentially through the extension in the user's normal Chrome session.
 
-The current milestone extracts product metadata and gallery URLs into the desktop results table. Despite the existing button label, image-file downloading and per-product folder writing are not implemented yet.
+The current milestone extracts authoritative product metadata/gallery URLs, downloads product images into Windows-safe per-product folders, and supports optional portable product metadata and identity files.
 
 ## Active architecture
 
@@ -26,6 +26,8 @@ The extension never opens a direct WebSocket. The WebSocket is deliberately reta
 - Google Chrome
 - Node.js only for the JavaScript regression tests
 
+The packaged Windows ONEDIR release does not require source Python, Node.js, the repository, or a virtual environment.
+
 ## Development setup
 
 ```powershell
@@ -47,6 +49,8 @@ python -m shopee_image_downloader.main
 
 See [chrome_extension/README.md](chrome_extension/README.md) for loading the extension and [native_host/README.md](native_host/README.md) for building or installing the Native Messaging Host.
 
+The public key in the MV3 manifest gives the unpacked Extension stable ID `bhbnfalghoklngoohdpnjedcdcplbjhm`. After loading it, verify that exact ID at `chrome://extensions` before registering the Native Host.
+
 ## Runtime entry points
 
 - Desktop: `shopee_image_downloader.main:main`
@@ -58,9 +62,9 @@ See [chrome_extension/README.md](chrome_extension/README.md) for loading the ext
 
 Architecture and protocol details are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). The cleanup audit is in [docs/CLEANUP_REPORT.md](docs/CLEANUP_REPORT.md).
 
-## Known regression
+## Release packaging
 
-For the known regression case, automatic batch processing currently returns four images while manual extension extraction can return nine. This behavior is intentionally preserved for the next debugging task.
+`packaging/ShopeeImageDownloader.spec` is the canonical Desktop ONEDIR definition. `packaging/build_windows_release.ps1` assembles the Desktop, a fresh Native Host, unchanged keyed Extension source, current-user registration scripts, and the Vietnamese first-run guide.
 
 ## License
 

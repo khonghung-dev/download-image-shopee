@@ -4,7 +4,7 @@ from dataclasses import replace
 import logging
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QSettings, Qt, QTimer
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -42,7 +42,7 @@ from shopee_image_downloader.core.error_policy import ErrorStage
 from shopee_image_downloader.core.url_validator import ParsedUrl, parse_url_lines
 from shopee_image_downloader.storage.settings import SettingsManager
 from shopee_image_downloader.ui.presentation import (
-    APP_STYLE_SHEET,
+    STATUS_TONE_DATA_ROLE,
     StatusTone,
     apply_table_status_tone,
     batch_summary_text,
@@ -53,6 +53,7 @@ from shopee_image_downloader.ui.presentation import (
     item_state_text,
     item_state_tone,
 )
+from shopee_image_downloader.ui.theme import Theme, ThemeManager
 from shopee_image_downloader.ui.url_table import UrlTableView
 from shopee_image_downloader.workers.bridge_worker import ExtensionBridgeServer
 from shopee_image_downloader.workers.image_download_worker import (
@@ -82,12 +83,15 @@ class MainWindow(QMainWindow):
         bridge_server: ExtensionBridgeServer | None = None,
         image_download_controller: ImageDownloadController | None = None,
         start_bridge: bool = True,
+        theme_settings: QSettings | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(__app_name__)
         self.resize(900, 860)
         self.setMinimumSize(620, 480)
         self.settings_manager = settings_manager or SettingsManager()
+        self.theme_manager = ThemeManager(settings=theme_settings, parent=self)
+        self.theme_manager.apply_remembered()
         self.bridge_server = bridge_server or ExtensionBridgeServer(parent=self)
         self.queue_manager = BatchQueueManager(parent=self)
         self.image_download_controller = (
@@ -177,7 +181,6 @@ class MainWindow(QMainWindow):
     def _init_ui(self) -> None:
         """Initialize all UI widgets, layouts, and table columns."""
         central_widget = QWidget(self)
-        central_widget.setStyleSheet(APP_STYLE_SHEET)
         root_layout = QVBoxLayout(central_widget)
         root_layout.setContentsMargins(14, 14, 14, 14)
         root_layout.setSpacing(10)
@@ -196,6 +199,13 @@ class MainWindow(QMainWindow):
         title_layout.addWidget(app_subtitle)
         header_layout.addLayout(title_layout)
         header_layout.addStretch(1)
+
+        self.theme_toggle_button = QPushButton(header_frame)
+        self.theme_toggle_button.setObjectName("themeToggleButton")
+        self.theme_toggle_button.setAccessibleName("Đổi giao diện sáng hoặc tối")
+        self.theme_toggle_button.clicked.connect(self._toggle_theme)
+        self._update_theme_toggle_text()
+        header_layout.addWidget(self.theme_toggle_button)
 
         self.bridge_frame = QFrame(header_frame)
         self.bridge_frame.setObjectName("bridgeFrame")
@@ -460,6 +470,38 @@ class MainWindow(QMainWindow):
         if saved_folder:
             self.output_folder_input.setText(saved_folder)
 
+    def _update_theme_toggle_text(self) -> None:
+        """Describe the theme that clicking the compact header control applies."""
+        if self.theme_manager.current_theme == Theme.DARK:
+            self.theme_toggle_button.setText("☀ Sáng")
+            self.theme_toggle_button.setToolTip("Chuyển sang giao diện sáng")
+        else:
+            self.theme_toggle_button.setText("☾ Tối")
+            self.theme_toggle_button.setToolTip("Chuyển sang giao diện tối")
+
+    def _toggle_theme(self) -> None:
+        """Restyle the application live without touching operational state."""
+        self.theme_manager.toggle()
+        self._update_theme_toggle_text()
+        self._refresh_table_status_colors()
+
+    def _refresh_table_status_colors(self) -> None:
+        """Re-resolve semantic result tones through the newly active palette."""
+        for row_idx in range(self.results_table.rowCount()):
+            item = self.results_table.item(row_idx, self.COL_STATUS)
+            if item is None:
+                continue
+            value = item.data(STATUS_TONE_DATA_ROLE)
+            try:
+                tone = StatusTone(str(value))
+            except ValueError:
+                continue
+            apply_table_status_tone(
+                item,
+                tone,
+                self.theme_manager.status_color(tone.value),
+            )
+
     def _update_url_count(self) -> None:
         """Show the valid count produced by the existing canonical parser."""
         parsed_items = parse_url_lines(self.url_input.toPlainText())
@@ -493,7 +535,11 @@ class MainWindow(QMainWindow):
             return
         status_item.setText(text)
         status_item.setToolTip(tooltip)
-        apply_table_status_tone(status_item, tone)
+        apply_table_status_tone(
+            status_item,
+            tone,
+            self.theme_manager.status_color(tone.value),
+        )
 
     def _queue_item_for_row(self, row_idx: int) -> QueueItem | None:
         """Resolve a presentation row from the authoritative queue model."""
@@ -1338,7 +1384,11 @@ class MainWindow(QMainWindow):
 
             status_item = QTableWidgetItem("Đã nhận từ Chrome")
             status_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            apply_table_status_tone(status_item, StatusTone.ACTIVE)
+            apply_table_status_tone(
+                status_item,
+                StatusTone.ACTIVE,
+                self.theme_manager.status_color(StatusTone.ACTIVE.value),
+            )
 
             self.results_table.setItem(row_idx, self.COL_NUMBER, stt_item)
             self.results_table.setItem(row_idx, self.COL_PRODUCT, link_item)

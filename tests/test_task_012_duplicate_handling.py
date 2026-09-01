@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+import threading
 from typing import Any
 
 import pytest
@@ -354,7 +355,21 @@ class _Opener:
         return _Response(body)
 
 
-def _downloader(opener: _Opener) -> ImageDownloader:
+class _UrlMappedOpener:
+    """Return deterministic bodies by request URL under concurrent scheduling."""
+
+    def __init__(self, bodies: dict[str, bytes]) -> None:
+        self._bodies = dict(bodies)
+        self._lock = threading.Lock()
+        self.calls = 0
+
+    def __call__(self, request: Any, **_kwargs: Any) -> _Response:
+        with self._lock:
+            self.calls += 1
+        return _Response(self._bodies[request.full_url])
+
+
+def _downloader(opener: Any) -> ImageDownloader:
     return ImageDownloader(
         DownloadConfig(
             connect_timeout_seconds=1,
@@ -376,7 +391,12 @@ def test_cross_run_partial_download_reuses_folder_and_completes_missing(
     existing.write_bytes(b"existing-one")
     reused = ensure_product_folder(tmp_path, "Changed Title", "1", "1")
     images = ["https://images.example/1.jpg", "https://images.example/2.jpg"]
-    opener = _Opener([b"new-one", b"new-two"])
+    opener = _UrlMappedOpener(
+        {
+            "https://images.example/1.jpg": b"new-one",
+            "https://images.example/2.jpg": b"new-two",
+        }
+    )
 
     result = _downloader(opener).download_product_images(images, reused)
 

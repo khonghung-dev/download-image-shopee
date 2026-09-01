@@ -31,7 +31,6 @@
   'use strict';
 
   const NATIVE_HOST_NAME = 'com.shopee_image_downloader.bridge';
-  const EXPECTED_EXTENSION_ID = 'kjkgdknadhnpigglcpjbgkkbcngclhgf';
   const PROTOCOL_VERSION = 1;
   // Keep aligned with Python DEFAULT_PRODUCT_ATTEMPT_TIMEOUT_MS. Three
   // attempts plus 1s/2s backoff form an approximately 30-second budget.
@@ -150,13 +149,6 @@
         }
       }
     });
-  }
-
-  // Validate extension ID
-  if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.id) {
-    if (chrome.runtime.id !== EXPECTED_EXTENSION_ID) {
-      console.warn(`[Bridge] Runtime Extension ID '${chrome.runtime.id}' differs from expected '${EXPECTED_EXTENSION_ID}'. Native host allowed_origins must match.`);
-    }
   }
 
   function broadcastStatus(state, message = '', hostInstalled = true) {

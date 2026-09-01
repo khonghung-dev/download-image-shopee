@@ -7,6 +7,7 @@ This document describes the only active runtime architecture. Historical Playwri
 ```mermaid
 flowchart LR
     UI[PySide6 MainWindow] --> Queue[BatchQueueManager]
+    UI --> Theme[ThemeManager / QSettings]
     Queue --> ProductWorker[ImageDownloadController / QThread]
     ProductWorker --> ProductFolder[Product Folder Manager]
     ProductWorker --> Downloader[core/ImageDownloader]
@@ -71,6 +72,7 @@ This is the single automatic batch flow. There is no `process_url` alias and no 
 |---|---|---|
 | `MainWindow` | User input, folder selection, presentation binding, signal wiring, desktop result/download orchestration | Shopee extraction, path-sanitization rules, blocking network calls, UI-derived business state |
 | `ui/presentation.py` | Canonical Vietnamese `ItemState` labels, status tones, result counts, and terminal-state batch-summary formatting | Queue transitions, retry/duplicate policy, product identity, downloader results |
+| `ui/theme.py` | Dark/light semantic palettes, application QSS/palette, live toggle state, and `QSettings` persistence | Queue, bridge, download, extraction, or product state |
 | `BatchQueueManager` | FIFO state, transition guards, request/product/folder correlation, same-batch successful-product registry, extraction timeout, cooperative user/verification pause-resume, progress, cancellation | Browser/tab control, DOM extraction, filesystem/network work |
 | `core/image_downloader.py` | Bounded concurrent image HTTP requests, authoritative index/MIME/extension choice, bounded retry/timeout, atomic file commits, ordered per-image/product results | Shopee discovery or extraction, Qt/UI state, product folder creation |
 | `core/product_metadata.py` | Pure metadata construction, portable relative image paths, UTF-8 JSON schema, atomic `product.json` replacement | Product identity ownership, downloading, folder naming, UI orchestration |
@@ -138,9 +140,11 @@ The queue-level lifecycle additionally has `PAUSE_REQUESTED` and `PAUSED_USER` s
 
 Overall progress is `terminal items / total items`. Terminal items are `SUCCESS`, `SKIPPED_DUPLICATE`, `COMPLETED_WITH_ERRORS`, `FAILED`, and `CANCELLED`; a currently downloading product does not increment it. Current-product progress is kept separately in its table row as `Đang tải ảnh n/total`. Final summaries derive downloaded-success, duplicate, failure, and cancellation counts from the terminal item states.
 
-## Task 014 presentation ownership
+## Task 014/015C presentation ownership
 
 `MainWindow` renders the queue and worker models but does not infer lifecycle state from widget text. `ui/presentation.py` is the single presentation mapping for real `ItemState` values (`PENDING` through terminal states), restrained visual tones, structured image availability, and terminal-state summary text. Request-ID/product-key row indexes remain presentation correlations only; the queue and product models remain authoritative.
+
+`ui/theme.py` owns the complete dark/light Qt palette and generated QSS. Normal labels and section titles are transparent; cards, inputs, tables, buttons, and the connection badge own their visual surfaces. `ThemeManager` applies the remembered `appearance/theme` value before the window is shown, toggles the application stylesheet live, and stores only `dark` or `light` through `QSettings`. Theme changes re-resolve semantic result-cell colors but never mutate the queue, current item, progress, URL model, result rows, checkbox values, or bridge connection property.
 
 The action contract uses Start, Cancel, and one state-aware Pause button. It reads `Tạm dừng` while running, `Đang tạm dừng...` while reaching a safe boundary, `Tiếp tục` during a user pause, and `Tiếp tục sau xác minh` during verification. `IDLE` restores Start and disables Pause/Cancel; cancellation stays available while paused. URL input, output selection, and both optional-export checkboxes are locked while the queue or product worker is active and restored after completion/cancellation, so a second batch can reuse the same window. The default 900×860 layout and initial 600:200 vertical splitter allocation give the URL grid about 200 px of visible height (roughly 2.5 times the former 82 px editor), while the tested 620×480 minimum remains resizable and usable.
 
@@ -237,6 +241,10 @@ Serialization is UTF-8 with readable Unicode, two-space indentation, a trailing 
 
 `METADATA_WRITE_ERROR` is a permanent `METADATA`-stage Task 011 error. It reports `Không thể ghi thông tin sản phẩm.`, retains technical details in logs, leaves completed images and any prior valid `product.json` intact, cleans the temporary file where safe, and continues automatic batch accounting through the existing failure path. Metadata stores no cookies, credentials, headers, Chrome profile/extension details, output root, product-folder path, or absolute image paths.
 
-## Required generated runtime artifact
+## Extension identity and Windows release artifacts
 
-`native_host/dist/shopee_native_host.exe` is a generated PyInstaller artifact but may be the executable referenced by the installed Native Messaging manifest. It is intentionally preserved. `native_host/shopee_native_host.spec` and the build/install/uninstall scripts are also preserved.
+`chrome_extension/manifest.json` is the sole canonical release identity source. Its `key` is a public SPKI DER value encoded as Base64; Chromium hashes those DER bytes with SHA-256, uses the first 128 bits, and maps hexadecimal nibbles `0-f` to `a-p`. This deterministically produces `bhbnfalghoklngoohdpnjedcdcplbjhm` regardless of extension path or developer account. No private key is required or retained for the unpacked release.
+
+`build_support/extension_identity.py` performs the independent build/test derivation. The development Native Messaging template contains an origin placeholder; `native_host/build_host.ps1` resolves it from the keyed manifest and then fails unless the generated manifest contains the one exact origin `chrome-extension://bhbnfalghoklngoohdpnjedcdcplbjhm/`.
+
+The Windows Desktop release uses `packaging/ShopeeImageDownloader.spec` in ONEDIR mode. `packaging/build_windows_release.ps1` builds the Desktop and a fresh Native Host into isolated generated directories, bundles unchanged Extension source, audits portable text and forbidden content, and creates the ZIP. The release install script derives the same ID directly from the bundled public key, resolves its own release directory, writes an absolute Native Host executable path into a generated manifest, and registers only the exact current-user Chrome Native Messaging key. It never uses an absolute repository path as a packaged dependency, changes Chrome profiles, kills Chrome, or requests administrator privileges.

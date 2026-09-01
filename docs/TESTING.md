@@ -24,6 +24,8 @@ The suite is offline and protects the current architecture rather than deleted i
 | `test_task_014_ui_polish.py` | Initial/running/paused/finished/cancelled UI states, parser-derived URL count, retry/duplicate/partial displays, per-image and metadata progress, long content, row stability, and second-batch reuse |
 | `test_task_015_reliability.py` | 100-product all-success/mixed stress, repeated batches, stale/duplicate signals, staged cancellation, cancel-to-new-batch, bridge reconnect, verification, network/temp-file matrix, metadata recovery, 5/9 partial recovery, reprocessing, title/path stress, progress flood, ownership audit, and nine-image end-to-end metadata |
 | `test_task_015b_pre_release.py` | 30-second product timeout budget, desktop/extension alignment, cooperative pause boundaries, verification generation safety, optional sidecar matrix/registry recovery, URL grid editing/paste/copy, progress placement, bounded image concurrency/order/pause/cancel/failure |
+| `test_task_015c_theme.py` | Dark/light defaults and `QSettings` persistence, transparent-label selector regression, complete theme surfaces, remembered window theme, and live running/paused state preservation |
+| `test_task_016a_release.py` | Public-key-derived stable Extension ID, path independence, historical runtime-ID absence, self-locating HKCU-only release scripts, ONEDIR spec, exact Vietnamese README identity, and Native Host build failure propagation |
 
 Deleted Playwright authentication, Python metadata-extractor, URL-resolver, and workaround-protocol tests are not part of the active suite.
 
@@ -198,5 +200,29 @@ The untouched Task 015 baseline completed with 280 passed, 0 failed, and 0 skipp
 - frozen extraction/native boundaries, JavaScript syntax, and the unchanged single canonical extractor/result builder.
 
 Live Chrome/Shopee acceptance is intentionally manual because automated tests must not access a personal Chrome profile or depend on live Shopee state. Before packaging, a developer must still verify the known nine-image product end to end, measure an actual repeatedly failing product, and perform the 30-product mixed-output soak including pause, cancel, verification, and a second batch. Task 015B does not build an executable.
+
+## Task 015C theme gate
+
+The untouched Task 015B baseline completed with 307 passed, 0 failed, and 0 skipped in 24.96 seconds. After Task 015C, the final clean full-suite rerun completed with 312 passed, 0 failed, and 0 skipped in 38.49 seconds. Task 015C adds offline deterministic regressions for:
+
+- missing/invalid theme settings defaulting to dark, explicit light/dark persistence, and reconstruction of a window with the remembered theme;
+- normal/section label selectors remaining transparent while the connection frame retains a semantic badge surface;
+- complete dark/light URL table, result table, inputs, buttons, checkboxes, progress, scrollbar, selection, disabled, tooltip, and status-tone styling;
+- live toggles during `RUNNING` and `PAUSED_USER` without changing the queue/current item, pause label, URL model, result rows, progress, checkbox values, or connection-state property.
+
+Chrome/Shopee acceptance remains manual, including the known nine-image automatic/downloaded/manual counts, foreground worker-tab behavior, verification, and actual failing-product wall time. Automated tests do not access a live page, Chrome profile, cookies, passwords, tokens, OTP data, or personal browser state. Task 015C does not build an executable.
+
+## Task 016A identity and Windows release gate
+
+The untouched Task 016A baseline completed with 311 passed, 0 failed, and 0 skipped. The final source suite completed with 316 passed, 0 failed, and 0 skipped in 65.81 seconds. Automated release evidence additionally verifies:
+
+- the manifest contains one public SPKI key and independently derives stable ID `bhbnfalghoklngoohdpnjedcdcplbjhm` by Chromium's SHA-256/first-128-bit/nibble mapping;
+- relocating the manifest does not change the ID, and the generated development Native Messaging manifest allows only `chrome-extension://bhbnfalghoklngoohdpnjedcdcplbjhm/`;
+- production runtime/configuration contains no historical path-derived ID, wildcard origin, private Extension key, Chrome profile operation, Chrome termination, or machine-wide registry target;
+- the Desktop spec uses PyInstaller `COLLECT`/ONEDIR, while the fresh Native Host has a different hash/timestamp from the preserved in-use development executable;
+- the packaged Desktop launches offscreen and the packaged Native Host completes a real `desktop_connected=true` bridge handshake;
+- the release installer derives the ID from the bundled manifest key, generates an absolute host path from its own directory, and registers only `HKCU\Software\Google\Chrome\NativeMessagingHosts\com.shopee_image_downloader.bridge`.
+
+Live Chrome extension loading is deliberately not automated. The user must reload/load unpacked once, verify Chrome displays the exact stable ID, and then execute the packaged known-product, theme, pause/resume, verification, timeout-continuation, duplicate, and second-batch checklist.
 
 Do not weaken extraction tests to make a failing implementation appear green. Record pre-existing failures separately from cleanup-introduced failures.

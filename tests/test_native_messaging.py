@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import io
 import json
 from pathlib import Path
@@ -31,6 +33,10 @@ from shopee_image_downloader.core.bridge_protocol import (
 from shopee_image_downloader.workers.bridge_worker import ExtensionBridgeServer
 from shopee_image_downloader.ui.main_window import MainWindow
 from shopee_image_downloader.storage.settings import SettingsManager
+from build_support.extension_identity import (
+    extension_id_from_manifest,
+    validate_native_manifest,
+)
 
 
 class SilentDownloadController(QObject):
@@ -154,22 +160,49 @@ def test_oversize_message_rejection() -> None:
     assert "Message size exceeds limit" in incoming.get("error", "")
 
 
-def test_allowed_extension_id_in_manifest() -> None:
-    """Verify manifest template contains exactly the expected Chrome Extension ID without wildcards."""
+def test_allowed_extension_id_in_manifest(tmp_path: Path) -> None:
+    """Derive the keyed ID and require the exact same Native Messaging origin."""
+    extension_manifest_path = REPO_ROOT / "chrome_extension" / "manifest.json"
+    extension_manifest = json.loads(extension_manifest_path.read_text(encoding="utf-8"))
+    public_key = extension_manifest.get("key")
+    assert isinstance(public_key, str) and public_key
+
+    public_key_der = base64.b64decode(public_key, validate=True)
+    first_128_bits_hex = hashlib.sha256(public_key_der).hexdigest()[:32]
+    independently_derived_id = "".join(
+        chr(ord("a") + int(nibble, 16)) for nibble in first_128_bits_hex
+    )
+    assert independently_derived_id == extension_id_from_manifest(extension_manifest_path)
+    assert re.fullmatch(r"[a-p]{32}", independently_derived_id)
+
+    copied_manifest = tmp_path / "unrelated-location" / "manifest.json"
+    copied_manifest.parent.mkdir()
+    copied_manifest.write_text(
+        json.dumps(extension_manifest),
+        encoding="utf-8",
+    )
+    assert extension_id_from_manifest(copied_manifest) == independently_derived_id
+
     template_path = NATIVE_HOST_DIR / "com.shopee_image_downloader.bridge.json.template"
     assert template_path.exists(), "Manifest template must exist"
+    template = json.loads(template_path.read_text(encoding="utf-8"))
+    assert template.get("name") == "com.shopee_image_downloader.bridge"
+    assert template.get("type") == "stdio"
+    assert template.get("allowed_origins") == ["EXTENSION_ORIGIN_PLACEHOLDER"]
 
-    data = json.loads(template_path.read_text(encoding="utf-8"))
-    assert data.get("name") == "com.shopee_image_downloader.bridge"
-    assert data.get("type") == "stdio"
-
-    allowed_origins = data.get("allowed_origins", [])
-    expected_origin = "chrome-extension://kjkgdknadhnpigglcpjbgkkbcngclhgf/"
-
-    assert allowed_origins == [expected_origin], (
-        f"allowed_origins must strictly be [{expected_origin}], got {allowed_origins}"
+    generated_manifest_path = (
+        NATIVE_HOST_DIR / "com.shopee_image_downloader.bridge.json"
     )
-    assert not any("*" in origin for origin in allowed_origins), "Wildcard origins are forbidden"
+    assert validate_native_manifest(
+        extension_manifest_path,
+        generated_manifest_path,
+    ) == independently_derived_id
+    expected_origin = f"chrome-extension://{independently_derived_id}/"
+    generated_manifest = json.loads(
+        generated_manifest_path.read_text(encoding="utf-8-sig")
+    )
+    assert generated_manifest.get("allowed_origins") == [expected_origin]
+    assert "*" not in expected_origin
 
 
 def test_desktop_unavailable_handling() -> None:

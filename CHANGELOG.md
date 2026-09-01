@@ -18,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added Task 014's polished PySide6 hierarchy, separate Start/Cancel/Continue controls, parser-derived URL count, model-driven status presentation, per-image/current-product progress, and reusable second-batch UI regressions.
 - Added Task 015's deterministic 100-product success/mixed stress gate, repeated-batch and callback-race coverage, staged cancellation/shutdown checks, network/filesystem/atomic-write matrix, ownership audit, and manual soak checklist.
 - Added Task 015B's cooperative Pause/Resume lifecycle, optional metadata/identity exports, atomic app-local folder registry, model-backed URL grid, split progress presentation, and bounded four-way per-product image concurrency.
+- Added Task 015C's semantic dark/light desktop theme manager, live header toggle, `QSettings` persistence, complete theme-aware widgets, and worker-lifecycle/theme state regressions.
+- Added Task 016A's canonical public MV3 manifest key, key-derived Native Messaging allowlist validation, and deterministic extension-identity regressions.
+- Added the Task 016 Windows ONEDIR Desktop spec, fresh Native Host build path, self-locating HKCU install/uninstall scripts, Vietnamese first-run guide, package audits, and ZIP assembly.
 
 ### Changed
 - Consolidated the runtime around PySide6 → localhost WebSocket → Native Host → Chrome Native Messaging → service worker → content script → `extractor_core.js`.
@@ -34,6 +37,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reduced the aligned desktop/extension extraction guard to 9 seconds per attempt (three attempts with one/two-second non-blocking backoff), and made verification resume use a fresh correlated request generation.
 - Redesigned the desktop and extension popup with one coordinated dark neon visual system while retaining the real foreground extension worker tab and frozen extractor/native boundaries.
 - Made `product.json` and `.shopee-product-id` independent opt-in exports, both off by default; disabling either leaves existing files untouched.
+- Moved desktop QSS/palette ownership into `ui/theme.py`; normal labels are transparent while cards, controls, tables, and semantic status badges own their surfaces in both dark and light themes.
+- Made release Native Messaging manifests derive their one exact allowed origin and absolute host path at install time from the bundled keyed Extension and release directory.
 
 ### Fixed
 - Restored manual Chrome Extension full-gallery traversal by waiting for ordered carousel media identities to advance, excluding video media, and refusing to promote a visible-only four-image window to `COMPLETE`.
@@ -42,6 +47,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Prevented different URLs for one successful product from creating/downloading twice, without treating failed products or Task 011 retry attempts as duplicates.
 - Prevented long Unicode product folders under deep Windows output roots from exceeding the atomic marker temp-path budget by bounding components in UTF-16 units with resolved-root-aware reserve space.
 - Prevented extension/desktop timeout churn during verification, stale pre-verification completion, unsafe marker-free folder guessing, registry-corruption adoption, concurrent filename/result reordering, and new image submission after cooperative pause/cancel boundaries.
+- Prevented global widget backgrounds from rendering opaque rectangles behind normal labels.
+- Prevented path-derived unpacked Extension IDs and Native Host ID drift from blocking or silently weakening the Windows release.
+- Made Native Host builds propagate PyInstaller failures and use an isolated fresh release output instead of reusing an in-use development executable.
 
 ### Removed
 - Removed the unused Python browser-session, authentication, URL-resolver, metadata-extractor, and associated worker implementations.

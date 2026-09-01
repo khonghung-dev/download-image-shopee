@@ -5,6 +5,11 @@ This directory contains the Chrome Native Messaging host for bridging the Shopee
 ## Host Name
 `com.shopee_image_downloader.bridge`
 
+The canonical public key is stored in `chrome_extension/manifest.json`. Build and
+release scripts derive stable extension ID `bhbnfalghoklngoohdpnjedcdcplbjhm`
+from that key and allow exactly
+`chrome-extension://bhbnfalghoklngoohdpnjedcdcplbjhm/`.
+
 ## Architecture
 ```
 Chrome Extension
@@ -17,7 +22,7 @@ PySide6 Desktop App (ExtensionBridgeServer)
 ## Directory Structure
 - `host.py`: Native host implementation (message framing, validation, and relay).
 - `ws_client.py`: Standard-library RFC 6455 loopback WebSocket client.
-- `com.shopee_image_downloader.bridge.json.template`: Manifest template with allowed extension ID.
+- `com.shopee_image_downloader.bridge.json.template`: Manifest template whose exact allowed origin is generated from the Extension manifest key.
 - `build_host.ps1`: Builds standalone `dist/shopee_native_host.exe` using PyInstaller and generates `com.shopee_image_downloader.bridge.json`.
 - `install_host.ps1`: Registers the host manifest under `HKCU\Software\Google\Chrome\NativeMessagingHosts\com.shopee_image_downloader.bridge`.
 - `uninstall_host.ps1`: Removes the HKCU registry key.
@@ -33,6 +38,10 @@ After building, register the native host in the current user's registry:
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\native_host\install_host.ps1
 ```
+
+The checked-in development manifest may contain a repository-local absolute
+executable path. Release installation generates a different manifest from its
+actual release directory; the development path is never a release dependency.
 
 ## Uninstalling the Native Host
 To remove the registration:

@@ -2,6 +2,7 @@
   "manifest_version": 3,
   "name": "Shopee Product Extractor",
   "version": "1.0.0",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAvPSlQ9LYSrI0RsxYSh80XZ3LfrZqDM2QsynYP4qM8FZo1U6MPGZZaxXmeDP+oIRUEl2ReZ2tHMFPXVos2fpUXCdgHi4CC2odTdgwPhEjzWtpQAK+QJJYC39J+CfliyOlg4CwK0TUDrNbrMOtrU+5p4kXwAUKNN53WHAamNXqVmx8X7MRn7GOqA/OUfjY6BdT8Iza3N8INkCvKZH3gB9OEmQQWuqXnPADMTTAMFOdzKtekeRia54FkjfU7aV/Jv40JMkiExWo7GKqhff3WwZlnmS/5TcuD6GwEeVKLKOwE4YKDWMP6OlfeKwW6+W8za/smqiElE5KyOaB8Lfy6H75iwIDAQAB",
   "description": "Extract Shopee product details and relay batch or manual results to Shopee Image Downloader.",
   "permissions": [
     "activeTab",

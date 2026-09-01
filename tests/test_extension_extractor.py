@@ -238,7 +238,6 @@ def test_background_js_runtime_state_machine():
 
     global.chrome = {{
       runtime: {{
-        id: 'kjkgdknadhnpigglcpjbgkkbcngclhgf',
         onMessage: {{
           addListener: (fn) => {{
             messageListener = fn;
@@ -871,7 +870,6 @@ def test_background_worker_lifecycle_simulation():
 
     global.chrome = {{
       runtime: {{
-        id: 'kjkgdknadhnpigglcpjbgkkbcngclhgf',
         connectNative: (name) => ({{
           postMessage: (msg) => {{
             calls.nativePosts.push(msg);
@@ -1045,7 +1043,6 @@ def test_background_worker_tab_reuse_multi_items():
 
     global.chrome = {{
       runtime: {{
-        id: 'kjkgdknadhnpigglcpjbgkkbcngclhgf',
         connectNative: (name) => ({{
           postMessage: () => {{}},
           onMessage: {{
@@ -1198,7 +1195,6 @@ def test_case_a_content_script_complete_9_images_batch_transmits_9():
 
     global.chrome = {{
       runtime: {{
-        id: 'kjkgdknadhnpigglcpjbgkkbcngclhgf',
         connectNative: (name) => ({{
           postMessage: (msg) => {{ nativePosts.push(msg); }},
           onMessage: {{ addListener: (cb) => {{ nativeMessageListener = cb; }}, removeListener: () => {{}} }},
@@ -1294,7 +1290,6 @@ def test_case_b_auto_send_exactly_once_guard():
 
     global.chrome = {{
       runtime: {{
-        id: 'kjkgdknadhnpigglcpjbgkkbcngclhgf',
         connectNative: (name) => ({{
           postMessage: (msg) => {{ nativePosts.push(msg); }},
           onMessage: {{ addListener: (cb) => {{ nativeMessageListener = cb; }}, removeListener: () => {{}} }},
@@ -1395,7 +1390,6 @@ def test_case_c_manual_and_batch_send_use_same_canonical_sender():
 
     global.chrome = {{
       runtime: {{
-        id: 'kjkgdknadhnpigglcpjbgkkbcngclhgf',
         connectNative: (name) => ({{
           postMessage: (msg) => {{ nativePosts.push(msg); }},
           onMessage: {{ addListener: (cb) => {{ nativeMessageListener = cb; }}, removeListener: () => {{}} }},
@@ -1530,7 +1524,6 @@ def test_case_d_stale_complete_event_ignored():
 
     global.chrome = {{
       runtime: {{
-        id: 'kjkgdknadhnpigglcpjbgkkbcngclhgf',
         connectNative: (name) => ({{
           postMessage: (msg) => {{ nativePosts.push(msg); }},
           onMessage: {{ addListener: (cb) => {{ nativeMessageListener = cb; }}, removeListener: () => {{}} }},
@@ -1624,7 +1617,6 @@ def test_case_e_no_complete_before_timeout_fails_with_product_timeout():
 
     global.chrome = {{
       runtime: {{
-        id: 'kjkgdknadhnpigglcpjbgkkbcngclhgf',
         connectNative: (name) => ({{
           postMessage: (msg) => {{ nativePosts.push(msg); }},
           onMessage: {{ addListener: (cb) => {{ nativeMessageListener = cb; }}, removeListener: () => {{}} }},
@@ -2474,7 +2466,6 @@ function sendToContent(request) {
 
 global.chrome = {
   runtime: {
-    id: 'kjkgdknadhnpigglcpjbgkkbcngclhgf',
     lastError: null,
     connectNative: () => ({
       postMessage: message => { nativePosts.push(message); },
