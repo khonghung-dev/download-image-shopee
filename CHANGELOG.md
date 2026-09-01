@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added Task 015C's semantic dark/light desktop theme manager, live header toggle, `QSettings` persistence, complete theme-aware widgets, and worker-lifecycle/theme state regressions.
 - Added Task 016A's canonical public MV3 manifest key, key-derived Native Messaging allowlist validation, and deterministic extension-identity regressions.
 - Added the Task 016 Windows ONEDIR Desktop spec, fresh Native Host build path, self-locating HKCU install/uninstall scripts, Vietnamese first-run guide, package audits, and ZIP assembly.
+- Added Task 017's fixed-AppId Inno Setup 6 definition, per-user install/uninstall Native Host lifecycle, installer-specific Vietnamese guide, compiler discovery/build script, and static installer safety gates. Inno Setup 6.7.3 now produces the versioned Setup artifact, whose default/custom install, same-version upgrade, uninstall, and reinstall lifecycle passed automated validation.
 
 ### Changed
 - Consolidated the runtime around PySide6 → localhost WebSocket → Native Host → Chrome Native Messaging → service worker → content script → `extractor_core.js`.

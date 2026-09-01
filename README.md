@@ -66,6 +66,8 @@ Architecture and protocol details are in [docs/ARCHITECTURE.md](docs/ARCHITECTUR
 
 `packaging/ShopeeImageDownloader.spec` is the canonical Desktop ONEDIR definition. `packaging/build_windows_release.ps1` assembles the Desktop, a fresh Native Host, unchanged keyed Extension source, current-user registration scripts, and the Vietnamese first-run guide.
 
+`packaging/ShopeeImageDownloader.iss` is the canonical Inno Setup 6 definition. Once built, Setup.exe is the recommended per-user Windows installation: it installs the proven ONEDIR payload and registers the Native Host automatically. The Chrome Extension still requires one explicit `Load unpacked` step. Its real foreground Shopee worker tab remains intentional. The portable ZIP stays available separately.
+
 ## License
 
 MIT.

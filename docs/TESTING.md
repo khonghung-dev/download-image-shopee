@@ -225,4 +225,20 @@ The untouched Task 016A baseline completed with 311 passed, 0 failed, and 0 skip
 
 Live Chrome extension loading is deliberately not automated. The user must reload/load unpacked once, verify Chrome displays the exact stable ID, and then execute the packaged known-product, theme, pause/resume, verification, timeout-continuation, duplicate, and second-batch checklist.
 
+## Task 017 final Windows installer gate
+
+The clean pre-change source baseline completed with 316 passed, 0 failed, and 0 skipped in 67.29 seconds after test-only `TEMP`, `APPDATA`, and `LOCALAPPDATA` paths were isolated inside the writable workspace. This redirection avoided accessing or changing the developer's real QSettings and product-folder identity registry.
+
+Static installer gates verify the fixed AppId, canonical `0.1.0` version, `PrivilegesRequired=lowest`, per-user default directory, dedicated versioned Setup output, optional Desktop shortcut, Start Menu entries, installer-specific guide, Task 016 ONEDIR payload routing, install/uninstall script execution with nonzero-exit handling, exact stable Extension/Native Host identities, and the absence of historical IDs, machine-wide access, Chrome policies/profile operations, developer paths, and private Extension key files.
+
+Inno Setup 6.7.3 compiled `ShopeeImageDownloader-Setup-0.1.0.exe` at 42,076,348 bytes with SHA-256 `D9425B4D864FF0F83E3C92172B73B17D8A3FFA12D8F7D014AC5747AE5C955747`. The portable ZIP remains the approved release baseline and was not overwritten.
+
+Automated installer validation passed for a fresh default install, installed GUI launch/clean close, same-version upgrade, exact fixed-AppId uninstall entry, one Start Menu application shortcut, one guide shortcut, optional Desktop shortcut, exact HKCU Native Host registration, generated absolute host path, exact stable origin, full payload hash equivalence, clean uninstall, preserved QSettings/identity-registry hashes, custom user-writable install path, custom uninstall, and final reinstall to the default path. Installed Dark/Light toggling and persistence were exercised through the real GUI accessibility control and the original `light` preference was restored byte-for-byte.
+
+The installed app reported `Chưa kết nối` because no Chrome Extension was loaded or changed during automated validation. Extension reconnect and the installed live 9/9/9/product/pause/verification/timeout/metadata/second-batch matrix remain user-run final acceptance. Their Task 016 portable baseline is still approved, and all 237 payload files carried into the installed program matched that baseline byte-for-byte.
+
+After installer source and its five static gates were added, the final full source suite completed with 321 passed, 0 failed, and 0 skipped in 69.94 seconds.
+
+After compiler discovery/identity-gate integration and the Inno application-close directive correction, the affected Task 017 static suite was rerun separately: 5 passed, 0 failed, and 0 skipped in 0.03 seconds. Unaffected business-core tests were not redundantly rerun.
+
 Do not weaken extraction tests to make a failing implementation appear green. Record pre-existing failures separately from cleanup-introduced failures.

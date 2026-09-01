@@ -79,7 +79,7 @@ Tasks 007A/007B/012/013/014/015 do not modify the extension, Native Host, galler
 
 ## Planned product work
 
-- [ ] Package and verify the full desktop application distribution.
+- [ ] TASK 017 — Final Windows Installer: canonical Inno Setup 6 source, final Setup artifact, static gates, and automated default/custom install-uninstall-reinstall matrix are complete; live installed-version Chrome/9-9-9 acceptance remains for the user.
 
 Task 007A's Product Folder Manager remains the sole owner of directory creation and now implements Task 012 marker ownership/reuse. Task 007B writes only controlled sequential image files inside that validated directory; it remains the sole existing-file/partial-download policy.
 
@@ -100,3 +100,5 @@ Task 015B's live nine-image flow, actual failing-product timing, and 30-product 
 Task 015C's live Light/Dark theme checks remain developer-run manual acceptance gates. Automated tests mock Qt state and never inspect personal browser data.
 
 Task 016's final Chrome/Shopee acceptance remains manual: reload the unpacked keyed Extension once, verify the displayed ID, connect it to the registered release Native Host, and run the known 9-image, pause/resume, verification, failing-product continuation, duplicate/cross-run, and second-batch checks from the packaged Desktop.
+
+Task 017 keeps the approved Task 016 ONEDIR payload as its installer source. It uses one fixed AppId, installs per user under `%LOCALAPPDATA%`, registers/unregisters only the current-user Native Host through the proven packaged scripts, and never silently installs the Extension. Inno Setup 6.7.3 compiled the final Setup, and automated default install, same-version upgrade, uninstall, custom-directory install, custom uninstall, and default reinstall checks passed. Chrome Extension reconnect and the installed 9/9/9/live-runtime matrix remain explicit manual acceptance because the installer does not access or alter the Chrome profile.
