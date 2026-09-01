@@ -21,6 +21,10 @@ from shopee_image_downloader.core.image_downloader import (
     ImageDownloader,
     ProductDownloadResult,
 )
+from shopee_image_downloader.core.product_metadata import (
+    build_product_metadata,
+    write_product_metadata,
+)
 from shopee_image_downloader.storage.product_folder import (
     ProductFolderError,
     ensure_product_folder,
@@ -121,6 +125,30 @@ class ImageDownloadWorker(QObject):
                     )
                 )
             else:
+                completed_product = replace(
+                    self._context.product,
+                    images=list(self._context.product.images),
+                    download_result=result,
+                )
+                self._context.product = completed_product
+                self._raise_if_cancelled()
+                try:
+                    metadata = build_product_metadata(
+                        completed_product,
+                        result,
+                    )
+                    write_product_metadata(product_folder, metadata)
+                except AppErrorException as exc:
+                    logger.exception(
+                        "Không thể ghi metadata cho %s: "
+                        "code=%s stage=%s technical=%s",
+                        completed_product.product_key,
+                        exc.error.error_code,
+                        exc.error.stage.value,
+                        exc.error.technical_message,
+                    )
+                    self._set_failure(exc.error)
+                    return
                 self._context.result = result
                 self._context.terminal_kind = "finished"
         except DownloadCancelledError:

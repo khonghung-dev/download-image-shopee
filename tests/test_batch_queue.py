@@ -553,7 +553,9 @@ def test_queue_does_not_advance_until_image_download_finishes(qtbot) -> None:
 
     assert manager.current_item.state == ItemState.CREATING_FOLDER
     assert started_rows == [0]
-    assert requested_products == [product]
+    assert requested_products == [
+        replace(product, input_url="https://shopee.vn/product-1")
+    ]
     assert manager.get_finished_count() == 0
 
     enriched = replace(product, product_folder=Path("product-201"))

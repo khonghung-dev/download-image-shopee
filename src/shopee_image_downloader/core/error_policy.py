@@ -35,6 +35,7 @@ class ErrorStage(str, Enum):
     EXTRACTION = "EXTRACTION"
     FOLDER = "FOLDER"
     DOWNLOAD = "DOWNLOAD"
+    METADATA = "METADATA"
     PROTOCOL = "PROTOCOL"
     CANCEL = "CANCEL"
 
@@ -87,6 +88,7 @@ _PERMANENT_CODES: frozenset[str] = frozenset(
         "PERMISSION_DENIED",
         "DISK_FULL",
         "IMAGE_DOWNLOAD_ERROR",
+        "METADATA_WRITE_ERROR",
         "UNSUPPORTED_RESPONSE",
         "EMPTY_IMAGE_RESPONSE",
         "NON_IMAGE_RESPONSE",
@@ -97,6 +99,7 @@ _CANCELLED_CODES: frozenset[str] = frozenset({"CANCELLED", "USER_CANCELLED"})
 _PROTOCOL_CODES: frozenset[str] = frozenset(
     {"PROTOCOL_INTEGRITY_ERROR", "INVALID_PROTOCOL_VERSION", "MALFORMED_PRODUCT_RESULT"}
 )
+_METADATA_CODES: frozenset[str] = frozenset({"METADATA_WRITE_ERROR"})
 
 _USER_MESSAGES: dict[str, str] = {
     "TIMEOUT": "Hết thời gian chờ Shopee.",
@@ -119,6 +122,7 @@ _USER_MESSAGES: dict[str, str] = {
     "PERMISSION_DENIED": "Không có quyền ghi vào thư mục đầu ra.",
     "DISK_FULL": "Không đủ dung lượng ổ đĩa.",
     "IMAGE_DOWNLOAD_ERROR": "Không thể hoàn tất tải ảnh sản phẩm.",
+    "METADATA_WRITE_ERROR": "Không thể ghi thông tin sản phẩm.",
     "UNSUPPORTED_RESPONSE": "Phản hồi không phải ảnh.",
     "EMPTY_IMAGE_RESPONSE": "Phản hồi ảnh rỗng.",
     "NON_IMAGE_RESPONSE": "Phản hồi chứa HTML hoặc JSON, không phải ảnh.",
@@ -142,7 +146,12 @@ def classify_error_code(
 ) -> AppError:
     """Map an existing desktop/extension error code through one policy."""
     normalized = str(error_code or "INTERNAL_ERROR").strip().upper()
-    resolved_stage = ErrorStage.PROTOCOL if normalized in _PROTOCOL_CODES else stage
+    if normalized in _PROTOCOL_CODES:
+        resolved_stage = ErrorStage.PROTOCOL
+    elif normalized in _METADATA_CODES:
+        resolved_stage = ErrorStage.METADATA
+    else:
+        resolved_stage = stage
 
     if normalized.startswith("HTTP_"):
         try:

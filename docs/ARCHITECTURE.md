@@ -47,8 +47,9 @@ When the user pastes URLs and clicks **Bắt đầu tải ảnh**, the exact cal
 19. The worker attaches the resulting `Path` to `BridgeProductData.product_folder` without changing the authoritative name, IDs, or image list. Its correlated `folder_ready` event moves the queue to `DOWNLOADING`.
 20. In the same worker thread, `ImageDownloader` receives `product.images` unchanged and in order and writes only below that exact `product.product_folder`.
 21. Correlated worker progress updates the table status (`Đang tải ảnh n/total`). Overall batch progress remains based only on terminal queue items.
-22. The worker stores its terminal outcome, requests `QThread` shutdown, and the controller clears its worker/thread ownership before publishing `finished`, `failed`, or `cancelled` to the UI.
-23. `BatchQueueManager.handle_download_result()` validates the request ID, product key, product name, image list, product folder, ordered per-image results, and totals. It marks the item `SUCCESS` or `COMPLETED_WITH_ERRORS`, then and only then advances to the next product. Controlled folder/downloader failures mark only that item `FAILED` and continue.
+22. After the final `ProductDownloadResult` exists, the same worker builds Task 013 metadata from the unchanged product snapshot and exact ordered download results, then atomically replaces `<product_folder>/product.json`.
+23. The worker stores its terminal outcome, requests `QThread` shutdown, and the controller clears its worker/thread ownership before publishing `finished`, `failed`, or `cancelled` to the UI.
+24. `BatchQueueManager.handle_download_result()` validates the request ID, product key, product name, image list, product folder, ordered per-image results, and totals. It marks the item `SUCCESS` or `COMPLETED_WITH_ERRORS`, then and only then advances to the next product. Controlled folder/downloader/metadata failures mark only that item `FAILED` and continue.
 
 This is the single automatic batch flow. There is no `process_url` alias and no polling-based `RUN_FULL_SCAN` path.
 
@@ -62,7 +63,7 @@ This is the single automatic batch flow. There is no `process_url` alias and no 
 6. `background.js` requests `GET_COMPLETE_SNAPSHOT` from `content.js`.
 7. `content.js:getCompleteSnapshotRPC()` returns its authoritative cached snapshot or invokes the same extractor core if required.
 8. `background.js` calls the same `sendCompleteProductToDesktop()` used by the automatic path.
-9. The result crosses the Native Host and desktop bridge. With no active correlated batch request, `MainWindow._on_bridge_product_received()` inserts or updates the row by `shop_id:item_id`, creates the Task 007A folder, and starts the same background downloader.
+9. The result crosses the Native Host and desktop bridge. With no active correlated batch request, `MainWindow._on_bridge_product_received()` inserts or updates the row by `shop_id:item_id`, creates/reuses the Task 007A/012 folder, and starts the same background folder/download/metadata worker used by the automatic flow.
 
 ## Component responsibilities
 
@@ -71,7 +72,8 @@ This is the single automatic batch flow. There is no `process_url` alias and no 
 | `MainWindow` | User input, folder selection, result presentation, signal wiring, desktop result/download orchestration | Shopee extraction, path-sanitization rules, blocking network calls |
 | `BatchQueueManager` | FIFO state, transition guards, request/product/folder correlation, same-batch successful-product registry, extraction timeout, progress, verification pause/resume, cancellation | Browser/tab control, DOM extraction, filesystem/network work |
 | `core/image_downloader.py` | Ordered image HTTP requests, MIME/extension choice, bounded retry/timeout, atomic file commits, per-image/product results | Shopee discovery or extraction, Qt/UI state, product folder creation |
-| `workers/image_download_worker.py` | One-product-at-a-time folder/download `QThread`, correlated progress/outcome context, cooperative cancellation, exact cleanup | Filename/MIME/retry policy, extraction |
+| `core/product_metadata.py` | Pure metadata construction, portable relative image paths, UTF-8 JSON schema, atomic `product.json` replacement | Product identity ownership, downloading, folder naming, UI orchestration |
+| `workers/image_download_worker.py` | One-product-at-a-time folder/download/metadata `QThread`, correlated progress/outcome context, cooperative cancellation, exact cleanup | Filename/MIME/retry policy, extraction |
 | `storage/product_folder.py` | Windows-safe naming, canonical marker discovery/creation, collision policy, output-root validation and containment | Image downloading, same-batch queue semantics, UI presentation |
 | `ExtensionBridgeServer` | Loopback WebSocket lifecycle, inbound validation, Qt signals | Shopee business extraction |
 | Native Host | Native Messaging framing and localhost relay | Product construction, extraction, queue policy |
@@ -138,7 +140,7 @@ Closing the application uses the same cooperative path. A close event is deferre
 
 ## Task 011 error and retry policy
 
-`core/error_policy.py` is the canonical desktop policy. `AppError` retains the existing error code, category, stage, Vietnamese user message, technical message, original exception type when available, retryability, and bounded `Retry-After` value. The categories are `TRANSIENT`, `PERMANENT`, `USER_ACTION_REQUIRED`, `CANCELLED`, and `INTERNAL`; stages are `VALIDATION`, `EXTRACTION`, `FOLDER`, `DOWNLOAD`, `PROTOCOL`, and `CANCEL`. Unknown codes default to `INTERNAL`, and protocol integrity/version/payload failures are never ordinary network retries.
+`core/error_policy.py` is the canonical desktop policy. `AppError` retains the existing error code, category, stage, Vietnamese user message, technical message, original exception type when available, retryability, and bounded `Retry-After` value. The categories are `TRANSIENT`, `PERMANENT`, `USER_ACTION_REQUIRED`, `CANCELLED`, and `INTERNAL`; stages are `VALIDATION`, `EXTRACTION`, `FOLDER`, `DOWNLOAD`, `METADATA`, `PROTOCOL`, and `CANCEL`. Unknown codes default to `INTERNAL`, and protocol integrity/version/payload failures are never ordinary network retries.
 
 Existing extension/desktop codes are classified rather than renamed. `PRODUCT_TIMEOUT` and the desktop `TIMEOUT`, network interruption, connection reset, and temporary bridge loss are transient. `NOT_FOUND`, invalid URLs/output paths, folder containment failures, permission errors, disk full, unsupported responses, and permanent HTTP responses are permanent. `VERIFICATION_REQUIRED` is user-action-required, and `CANCELLED` remains cancellation.
 
@@ -154,7 +156,7 @@ User-facing mappings include `Không tìm thấy sản phẩm.`, `Hết thời g
 
 The internal marker is always `<product_folder>/.shopee-product-id` and contains only the canonical key as UTF-8 text. New-folder creation commits it atomically through a same-directory temporary file and `replace`; marker failure stops the folder stage before image download. Discovery scans immediate output-root children only, rejects unsafe symlink/reparse containment, and reuses a directory only for an exact valid marker match. A changed title never renames a marker-owned folder.
 
-An unmarked legacy directory, corrupt marker, or marker belonging to another product is ownership-unknown and is never adopted or overwritten. The manager preserves it and uses `<title> [<shop_id>-<item_id>]` (with a deterministic numbered fallback if that path is also occupied). Thus equal titles with different keys remain separate. If multiple immediate children validly claim one key, folder resolution fails permanently with `MULTIPLE_PRODUCT_FOLDERS` and modifies neither directory. `.shopee-product-id` is solely an internal identity/ownership marker; it is not the future Task 013 product metadata file.
+An unmarked legacy directory, corrupt marker, or marker belonging to another product is ownership-unknown and is never adopted or overwritten. The manager preserves it and uses `<title> [<shop_id>-<item_id>]` (with a deterministic numbered fallback if that path is also occupied). Thus equal titles with different keys remain separate. If multiple immediate children validly claim one key, folder resolution fails permanently with `MULTIPLE_PRODUCT_FOLDERS` and modifies neither directory. `.shopee-product-id` remains the sole identity/ownership marker; `product.json` is informational and never makes an unmarked folder trusted.
 
 Task 007B accepts exactly `BridgeProductData.images`; it never discovers, filters, sorts, or re-extracts media. The only destination is the existing validated `BridgeProductData.product_folder` created by Task 007A. Controlled filenames use the one-based input index with `max(2, digits(total))` padding (`01`, `09`, `001`, `120`). URL path fragments never become filenames.
 
@@ -177,6 +179,49 @@ Product-folder creation and the blocking standard-library HTTP/file loop run onl
 The queue keeps one batch-local registry containing only fully successful, reusable product results. A later distinct input resolving to the same key becomes `SKIPPED_DUPLICATE`, retains its own queue row/request accounting, reuses the successful folder/result reference, and starts no second download. `FAILED` and `COMPLETED_WITH_ERRORS` results do not enter that registry, so a later item may process normally. Cross-run discovery is intentionally different: finding a marker-owned folder reuses the folder but invokes the downloader so incomplete historical downloads can heal.
 
 Manual Extension → Desktop sends continue to update table rows by product key and use the same Product Folder Manager and downloader. They do not mutate an active automatic queue and do not create a second marker-owned folder for an existing product.
+
+## Task 013 product metadata
+
+Every automatic or manual managed worker lifecycle that reaches a final `ProductDownloadResult` writes exactly `<product_folder>/product.json`. `build_product_metadata()` uses the authoritative `BridgeProductData.images` order and the existing `ProductDownloadResult`; it never scans the directory or changes the product model. The automatic queue snapshots its logical input URL into `BridgeProductData.input_url`, while a genuinely unavailable manual input URL is serialized as JSON `null`.
+
+Schema version 1 contains `product_name`, `shop_id`, `item_id`, canonical `product_key`, `source_url`, authoritative `image_count`, ordered `images`, `download`, and a small product `status` (`success` or `partial`). Each image entry contains `index`, `source_url`, portable `local_file`, and `status` (`success`, `failed`, or `skipped_existing`). Download counters retain the current-run downloader semantics: `successful` means newly written, while `skipped` means an existing usable target.
+
+```json
+{
+  "schema_version": 1,
+  "product_name": "Túi đựng đồ du lịch",
+  "shop_id": "123",
+  "item_id": "456",
+  "product_key": "123:456",
+  "source_url": "https://shopee.vn/example-i.123.456",
+  "image_count": 2,
+  "images": [
+    {
+      "index": 1,
+      "source_url": "https://images.example/1",
+      "local_file": "01.webp",
+      "status": "success"
+    },
+    {
+      "index": 2,
+      "source_url": "https://images.example/2",
+      "local_file": "02.jpg",
+      "status": "skipped_existing"
+    }
+  ],
+  "download": {
+    "total": 2,
+    "successful": 1,
+    "failed": 0,
+    "skipped": 1
+  },
+  "status": "success"
+}
+```
+
+Serialization is UTF-8 with readable Unicode, two-space indentation, a trailing newline, flush/`fsync`, and same-directory `product.json.tmp` → atomic replace. Reprocessing a marker-owned folder replaces the one current metadata file, so title, source URL, image list, and current-run counters can change without renaming the folder or deleting stale images. A same-batch `SKIPPED_DUPLICATE` starts no worker and therefore performs no second metadata write.
+
+`METADATA_WRITE_ERROR` is a permanent `METADATA`-stage Task 011 error. It reports `Không thể ghi thông tin sản phẩm.`, retains technical details in logs, leaves completed images and any prior valid `product.json` intact, cleans the temporary file where safe, and continues automatic batch accounting through the existing failure path. Metadata stores no cookies, credentials, headers, Chrome profile/extension details, output root, product-folder path, or absolute image paths.
 
 ## Required generated runtime artifact
 

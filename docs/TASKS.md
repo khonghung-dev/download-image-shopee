@@ -41,13 +41,17 @@ This file tracks the current architecture, not superseded implementation generat
 - [x] Task 012: batch-local successful-product registry with terminal `SKIPPED_DUPLICATE`, stable input accounting, and no duplicate download.
 - [x] Task 012: failed/partial results remain retryable by later items; Task 011 transport retries are not duplicates.
 - [x] Task 012: marker-owned complete/partial folders reuse the existing Task 007B downloader and preserve authoritative image lists.
+- [x] Task 013: canonical schema-versioned `product.json` builder/writer using authoritative product and final downloader results.
+- [x] Task 013: readable UTF-8 JSON, portable exact local filenames, ordered per-image statuses, current-run download summary, and atomic replacement.
+- [x] Task 013: automatic and manual managed lifecycles write metadata after downloads; metadata failures use the Task 011 `METADATA` stage without deleting images.
+- [x] Task 013: cross-run metadata refresh, marker independence, same-batch duplicate no-rewrite, partial/skipped-existing, and nine-image regressions.
 
 ## Frozen extraction regression
 
 - [x] Known nine-image-plus-one-video product produces nine authoritative images in the automatic flow.
 - [x] The manual extension send uses the same authoritative nine-image result path.
 
-Tasks 007A/007B/012 do not modify the extension, Native Host, gallery traversal, video filtering, or authoritative cache. Task 012 is Python desktop identity/filesystem/queue logic only.
+Tasks 007A/007B/012/013 do not modify the extension, Native Host, gallery traversal, video filtering, or authoritative cache. Task 013 is Python desktop metadata serialization and worker-lifecycle integration only.
 
 ## Planned product work
 
@@ -59,4 +63,6 @@ Task 010 does not change the Chrome Extension, Native Host, extraction protocol,
 
 Task 011 adds automatic retries only for transient product opening/extraction failures. It does not add a manual retry button, rerun completed failed batches, change duplicate-product semantics, modify the extension/native architecture, or retry a whole product after Task 007B returns partial image failures.
 
-Task 012 does not add product metadata JSON, folder auto-renaming, content hashing, a database/global index, automatic legacy migration, or Task 013 metadata. `.shopee-product-id` is a tiny internal ownership marker only.
+Task 012's `.shopee-product-id` remains the only persistent folder ownership marker. Task 013's `product.json` is portable product/output metadata and is never used to adopt an unmarked folder.
+
+Task 013 does not add folder auto-renaming, stale-image deletion, content hashing, exports, a database/global index, a metadata migration framework, or packaging changes.

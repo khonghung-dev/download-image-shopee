@@ -504,6 +504,7 @@ class BatchQueueManager(QObject):
         product_snapshot = replace(
             product_data,
             images=list(product_data.images),
+            input_url=item.input_url,
             product_folder=None,
             download_result=None,
         )

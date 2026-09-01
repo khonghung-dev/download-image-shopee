@@ -20,6 +20,7 @@ The suite is offline and protects the current architecture rather than deleted i
 | `test_task_010_batch_reliability.py` | 10-item FIFO execution, middle-stage failure continuation, stale extraction/worker events, double start, cancellation terminalization, product isolation, GUI responsiveness, worker cleanup, and close-during-download |
 | `test_task_011_error_retry.py` | Canonical classification, product retry/exhaustion, verification, stale attempt generations, 429/4xx/5xx policy, permission/disk full, cancellation/close backoff safety, multi-product totals, and nine-image preservation |
 | `test_task_012_duplicate_handling.py` | Canonical product keys, atomic markers, cross-run reuse/collisions, duplicate claims, same-batch skip, failure/retry distinctions, partial/complete reuse, zero-byte replacement, and image preservation |
+| `test_task_013_product_metadata.py` | Schema/identity/source fields, readable UTF-8, image order/filenames/statuses, partial/skipped summaries, atomic replacement/failure, marker independence, automatic/manual lifecycles, duplicate no-rewrite, and nine-image preservation |
 
 Deleted Playwright authentication, Python metadata-extractor, URL-resolver, and workaround-protocol tests are not part of the active suite.
 
@@ -124,6 +125,21 @@ Task 011 tests are offline and use Qt timers, scripted HTTP responses, injected 
 - The nine-image authoritative list remains nine entries after same-batch resolution, marker reuse, and download completion.
 - Manual Extension → Desktop sends still update by product key and reuse the marker-owned folder without changing automatic queue state.
 
-`.shopee-product-id` is an internal identity/ownership marker, not the future Task 013 product metadata file. Task 012 tests do not implement or expect metadata JSON, folder renaming, hashing, migration, or a database.
+`.shopee-product-id` is the internal identity/ownership marker; Task 013's `product.json` does not participate in folder discovery or adoption.
+
+## Task 013 metadata regressions
+
+- `schema_version` is integer `1`; identity fields use the existing canonical `shop_id:item_id` property, and automatic metadata uses the logical queue item's original input URL.
+- `image_count` and the ordered `images` array come only from authoritative `product.images`; the known nine-image-plus-one-video model remains nine entries and is not mutated.
+- Per-image metadata preserves exact downloader filenames (`.jpg`, `.webp`, `.png`) as portable relative paths and maps current statuses to `success`, `failed`, and `skipped_existing`.
+- Failed authoritative images remain represented. `download.total/successful/failed/skipped` retain the final current-run downloader counters, and product status is `partial` when any image failed.
+- Vietnamese product names are emitted directly as valid UTF-8 rather than escaped `\\uXXXX` sequences.
+- Reprocessing atomically replaces one `product.json` through `product.json.tmp`; no numbered metadata or temporary file remains after success.
+- Simulated atomic-replace failure preserves completed image bytes and the prior valid metadata, produces controlled `METADATA_WRITE_ERROR` at `ErrorStage.METADATA`, and leaves no corrupted final JSON.
+- A title change reuses the marker-owned folder but refreshes `product_name`; missing metadata does not weaken marker reuse, and metadata alone never claims an unmarked folder.
+- Automatic and manual Extension → Desktop managed workers share the one metadata writer after their final download result.
+- A same-batch `SKIPPED_DUPLICATE` performs no second download, folder creation, or metadata rewrite.
+
+Task 013 tests use local synthetic models and downloader doubles only. They do not access Shopee, store sensitive values or absolute local paths, alter extraction code, delete stale images, rename folders, or add a catalog/database.
 
 Do not weaken extraction tests to make a failing implementation appear green. Record pre-existing failures separately from cleanup-introduced failures.
