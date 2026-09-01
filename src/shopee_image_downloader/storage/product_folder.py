@@ -26,6 +26,10 @@ MAX_PRODUCT_FOLDER_NAME_LENGTH: int = 120
 PRODUCT_ID_MARKER_FILENAME: str = ".shopee-product-id"
 _MAX_MARKER_BYTES: int = 128
 _WINDOWS_REPARSE_POINT_ATTRIBUTE: int = 0x400
+_WINDOWS_LEGACY_MAX_PATH_UNITS: int = 260
+_MARKER_TEMP_FILENAME_UNITS: int = len(
+    f"{PRODUCT_ID_MARKER_FILENAME}.{'0' * 32}.tmp"
+)
 
 _INVALID_WINDOWS_RUN = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
 _WHITESPACE_RUN = re.compile(r"\s+")
@@ -64,59 +68,131 @@ def _safe_identity_part(value: object | None) -> str:
     return text or "unknown"
 
 
-def _fallback_name(shop_id: object | None, item_id: object | None) -> str:
+def _utf16_units(value: str) -> int:
+    """Return the Windows path-length units used by UTF-16 APIs."""
+    return len(value.encode("utf-16-le")) // 2
+
+
+def _truncate_windows_component(value: str, max_units: int) -> str:
+    """Truncate without splitting a Unicode code point in UTF-16."""
+    if max_units < 1:
+        return ""
+    used = 0
+    characters: list[str] = []
+    for character in value:
+        character_units = _utf16_units(character)
+        if used + character_units > max_units:
+            break
+        characters.append(character)
+        used += character_units
+    return "".join(characters).rstrip(" .")
+
+
+def _folder_component_limit(root: Path) -> int:
+    """Reserve space for the longest controlled atomic marker path."""
+    available = (
+        _WINDOWS_LEGACY_MAX_PATH_UNITS
+        - 1  # terminating NUL is part of the legacy MAX_PATH value
+        - _utf16_units(str(root))
+        - 2  # separators before the folder and marker temporary file
+        - _MARKER_TEMP_FILENAME_UNITS
+    )
+    if available < 1:
+        raise ProductFolderError(
+            "Đường dẫn thư mục đầu ra quá dài để tạo thư mục sản phẩm an toàn.",
+            error_code="INVALID_OUTPUT_PATH",
+        )
+    return min(MAX_PRODUCT_FOLDER_NAME_LENGTH, available)
+
+
+def _fallback_name(
+    shop_id: object | None,
+    item_id: object | None,
+    *,
+    max_units: int = MAX_PRODUCT_FOLDER_NAME_LENGTH,
+) -> str:
     """Build the stable fallback used when a title is unusable."""
-    return (
+    return _truncate_windows_component(
         f"product_{_safe_identity_part(shop_id)}_"
-        f"{_safe_identity_part(item_id)}"
-    )[:MAX_PRODUCT_FOLDER_NAME_LENGTH].rstrip(" .")
+        f"{_safe_identity_part(item_id)}",
+        max_units,
+    )
 
 
 def sanitize_product_folder_name(
     product_name: object | None,
     shop_id: object | None = None,
     item_id: object | None = None,
+    *,
+    max_units: int = MAX_PRODUCT_FOLDER_NAME_LENGTH,
 ) -> str:
     """Return a deterministic Windows-safe single path component.
 
     Vietnamese and other Unicode text is preserved. Invalid Windows filename
     runs and ASCII control-character runs are replaced with ``_``.
     """
+    if max_units < 1:
+        raise ValueError("max_units must be at least one")
     raw_name = "" if product_name is None else str(product_name)
     sanitized = _INVALID_WINDOWS_RUN.sub("_", raw_name)
     sanitized = _WHITESPACE_RUN.sub(" ", sanitized).strip()
     sanitized = sanitized.rstrip(" .")
 
     if not sanitized or not sanitized.strip("_") or sanitized in {".", ".."}:
-        return _fallback_name(shop_id, item_id)
+        return _fallback_name(shop_id, item_id, max_units=max_units)
 
     basename = sanitized.split(".", 1)[0]
     if _RESERVED_DEVICE_NAME.fullmatch(basename):
         sanitized = f"_{sanitized}"
 
-    sanitized = sanitized[:MAX_PRODUCT_FOLDER_NAME_LENGTH].rstrip(" .")
+    sanitized = _truncate_windows_component(sanitized, max_units)
     if not sanitized or not sanitized.strip("_") or sanitized in {".", ".."}:
-        return _fallback_name(shop_id, item_id)
+        return _fallback_name(shop_id, item_id, max_units=max_units)
     return sanitized
 
 
-def _collision_name(base_name: str, shop_id: object | None, item_id: object | None) -> str:
+def _collision_name(
+    base_name: str,
+    shop_id: object | None,
+    item_id: object | None,
+    *,
+    max_units: int = MAX_PRODUCT_FOLDER_NAME_LENGTH,
+) -> str:
     """Build the identity-suffixed collision component."""
     identity = f"{_safe_identity_part(shop_id)}-{_safe_identity_part(item_id)}"
-    max_identity_length = MAX_PRODUCT_FOLDER_NAME_LENGTH - len("product []")
-    identity = identity[:max_identity_length].rstrip(" .") or "unknown"
+    max_identity_length = max(1, max_units - _utf16_units("product []"))
+    identity = (
+        _truncate_windows_component(identity, max_identity_length) or "unknown"
+    )
     suffix = f" [{identity}]"
-    available = MAX_PRODUCT_FOLDER_NAME_LENGTH - len(suffix)
-    prefix = base_name[:available].rstrip(" .") or "product"
-    return f"{prefix}{suffix}"[:MAX_PRODUCT_FOLDER_NAME_LENGTH].rstrip(" .")
+    available = max_units - _utf16_units(suffix)
+    if available < 1:
+        return _truncate_windows_component(identity, max_units) or "p"
+    prefix = (
+        _truncate_windows_component(base_name, available)
+        or _truncate_windows_component("product", available)
+        or "p"
+    )
+    return _truncate_windows_component(f"{prefix}{suffix}", max_units)
 
 
-def _numbered_collision_name(base_name: str, number: int) -> str:
+def _numbered_collision_name(
+    base_name: str,
+    number: int,
+    *,
+    max_units: int = MAX_PRODUCT_FOLDER_NAME_LENGTH,
+) -> str:
     """Return a stable fallback when even the identity suffix is occupied."""
     suffix = f" ({number})"
-    available = MAX_PRODUCT_FOLDER_NAME_LENGTH - len(suffix)
-    prefix = base_name[:available].rstrip(" .") or "product"
-    return f"{prefix}{suffix}"
+    available = max_units - _utf16_units(suffix)
+    if available < 1:
+        return _truncate_windows_component(str(number), max_units) or "p"
+    prefix = (
+        _truncate_windows_component(base_name, available)
+        or _truncate_windows_component("product", available)
+        or "p"
+    )
+    return _truncate_windows_component(f"{prefix}{suffix}", max_units)
 
 
 def _validated_child(root: Path, component: str) -> Path:
@@ -256,13 +332,20 @@ def _choose_available_target(
     folder_name: str,
     shop_id: object,
     item_id: object,
+    *,
+    max_units: int = MAX_PRODUCT_FOLDER_NAME_LENGTH,
 ) -> Path:
     """Choose a direct child without adopting any unmarked existing entry."""
     primary = _validated_child(root, folder_name)
     if not _entry_exists(primary):
         return primary
 
-    collision_component = _collision_name(folder_name, shop_id, item_id)
+    collision_component = _collision_name(
+        folder_name,
+        shop_id,
+        item_id,
+        max_units=max_units,
+    )
     collision = _validated_child(root, collision_component)
     if not _entry_exists(collision):
         return collision
@@ -271,7 +354,11 @@ def _choose_available_target(
     while number <= 10_000:
         candidate = _validated_child(
             root,
-            _numbered_collision_name(collision_component, number),
+            _numbered_collision_name(
+                collision_component,
+                number,
+                max_units=max_units,
+            ),
         )
         if not _entry_exists(candidate):
             return candidate
@@ -363,8 +450,20 @@ def ensure_product_folder(
         )
         return existing_owned
 
-    folder_name = sanitize_product_folder_name(product_name, shop_id, item_id)
-    target = _choose_available_target(root, folder_name, shop_id, item_id)
+    component_limit = _folder_component_limit(root)
+    folder_name = sanitize_product_folder_name(
+        product_name,
+        shop_id,
+        item_id,
+        max_units=component_limit,
+    )
+    target = _choose_available_target(
+        root,
+        folder_name,
+        shop_id,
+        item_id,
+        max_units=component_limit,
+    )
 
     try:
         target.mkdir(parents=False, exist_ok=False)

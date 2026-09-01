@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added Task 012's canonical product identity, atomic `.shopee-product-id` ownership marker, cross-run folder reuse, and same-batch `SKIPPED_DUPLICATE` state.
 - Added Task 013's schema-versioned UTF-8 `product.json`, pure metadata builder, atomic writer, metadata error stage, and automatic/manual lifecycle coverage.
 - Added Task 014's polished PySide6 hierarchy, separate Start/Cancel/Continue controls, parser-derived URL count, model-driven status presentation, per-image/current-product progress, and reusable second-batch UI regressions.
+- Added Task 015's deterministic 100-product success/mixed stress gate, repeated-batch and callback-race coverage, staged cancellation/shutdown checks, network/filesystem/atomic-write matrix, ownership audit, and manual soak checklist.
 
 ### Changed
 - Consolidated the runtime around PySide6 → localhost WebSocket → Native Host → Chrome Native Messaging → service worker → content script → `extractor_core.js`.
@@ -35,6 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Prevented duplicate dispatch/advance, stale callbacks completing the next product, cancellation being counted as failure, pending items remaining non-terminal after cancellation, and application close destroying an active QThread.
 - Prevented late results/errors from earlier product attempts, retry timers firing after cancellation/close, and product-level retry multiplying Task 007B image retries.
 - Prevented different URLs for one successful product from creating/downloading twice, without treating failed products or Task 011 retry attempts as duplicates.
+- Prevented long Unicode product folders under deep Windows output roots from exceeding the atomic marker temp-path budget by bounding components in UTF-16 units with resolved-root-aware reserve space.
 
 ### Removed
 - Removed the unused Python browser-session, authentication, URL-resolver, metadata-extractor, and associated worker implementations.

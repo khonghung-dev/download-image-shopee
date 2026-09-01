@@ -22,6 +22,7 @@ The suite is offline and protects the current architecture rather than deleted i
 | `test_task_012_duplicate_handling.py` | Canonical product keys, atomic markers, cross-run reuse/collisions, duplicate claims, same-batch skip, failure/retry distinctions, partial/complete reuse, zero-byte replacement, and image preservation |
 | `test_task_013_product_metadata.py` | Schema/identity/source fields, readable UTF-8, image order/filenames/statuses, partial/skipped summaries, atomic replacement/failure, marker independence, automatic/manual lifecycles, duplicate no-rewrite, and nine-image preservation |
 | `test_task_014_ui_polish.py` | Initial/running/finished/cancelled UI states, parser-derived URL count, retry/duplicate/partial displays, per-image and metadata progress, long content, row stability, and second-batch reuse |
+| `test_task_015_reliability.py` | 100-product all-success/mixed stress, repeated batches, stale/duplicate signals, staged cancellation, cancel-to-new-batch, bridge reconnect, verification, network/temp-file matrix, metadata recovery, 5/9 partial recovery, reprocessing, title/path stress, progress flood, ownership audit, and nine-image end-to-end metadata |
 
 Deleted Playwright authentication, Python metadata-extractor, URL-resolver, and workaround-protocol tests are not part of the active suite.
 
@@ -156,5 +157,29 @@ Task 013 tests use local synthetic models and downloader doubles only. They do n
 - Default, minimum-size, and expanded layouts use Qt layouts/header policies instead of absolute positioning, keeping primary controls visible under common Windows display scaling.
 
 Task 014 tests use the offscreen Qt platform, synthetic bridge products, and deterministic controller doubles. They do not access Shopee, Chrome, or the network.
+
+## Task 015 Reliability Gate
+
+Task 015 automated acceptance is offline and deterministic. The unchanged Tasks 001–014 baseline completed with 233 passed in 49.11 seconds. After the Task 015 tests and the one evidence-backed storage fix, the full suite completed with 280 passed, 0 failed, and 0 skipped in 57.19 seconds.
+
+Automated acceptance includes:
+
+- 100 unique successful products in FIFO order with exactly 100 terminal items, final progress 100/100, unique dispatch IDs, and maximum one active logical product.
+- A deterministic mixed 100-product batch covering permanent failure, transient retry then success, duplicate products, partial image results, and skipped existing files, with exact terminal accounting and product-key isolation.
+- Three sequential batches in one `MainWindow` lifetime, stale prior-batch callback rejection, row-map reset, reusable controls, inactive timers, and no duplicate controller start.
+- Repeated stale request generations and rapid duplicate extraction/progress/metadata/terminal/error events without double start, double terminal transition, or double advance.
+- Cancellation during opening, extraction, retry, folder creation, downloading, and metadata presentation; cancel-to-new-batch isolation; cancellation/close-safe retry timers; cooperative active-worker close.
+- Application-owned QThread cleanup, controller `_thread`/`_worker`/`_context` release, no growing worker collection, and no Qt thread-destroyed failure.
+- Timeout, reset, 429, 500, 502, 503, 504, 404, HTML, JSON, empty-body, mid-transfer, permission, and disk-full handling with bounded attempts and no handled orphan `.part`.
+- Atomic `product.json` failure/recovery, prior valid JSON preservation, temp cleanup, marker conflict preservation, 5-of-9 partial recovery, complete cross-run reprocessing, and correct current-run metadata.
+- Forty same-title products with distinct markers, Unicode/emoji/combining/reserved/path-like title containment, malicious-title output-root containment, and marker/image/metadata destination ownership.
+- A 5,000-event worker progress flood while the Qt event loop continues to deliver a timer and cancellation without calling `QApplication.processEvents()`.
+- Known nine-image authoritative data through the real desktop worker, nine final images, and `product.json` `image_count == 9` with nine image entries.
+
+The Task 015 failure evidence was a 273-UTF-16-unit atomic marker temp path created from a 96-unit output root, a 120-unit product component, two separators, and a 55-unit marker temp filename. Windows created the product directory but failed the marker temp open with `FileNotFoundError`. The Product Folder Manager now retains the 120-unit ceiling while reducing the component for the resolved root depth and reserves the exact marker temp budget. The regression covers long Vietnamese, emoji, and combining-Unicode names under deep temporary roots; existing marker/collision/reuse tests remain green.
+
+The ownership audit treats `BatchQueueManager._known_request_ids` as deliberate session-lifetime tombstones: old automatic request IDs must remain recognizable so a late result can never be reinterpreted as a manual Extension send while the window is idle. The repeated audit recorded exactly one tombstone per issued generation (100 IDs), while live queue items/reusable products are replaced per batch, UI row maps are cleared per batch, both timers are inactive at terminal state, and controller worker/thread/context references are released. This safety history is intentional rather than a worker/timer leak.
+
+The executed evidence ledger is `docs/TASK_015_RELIABILITY_MATRIX.md`. Live Shopee remains manual-only; use `docs/TASK_015_MANUAL_SOAK.md` for the 30+ URL sequential soak, known 9-image automatic/manual check, 20+ URL cancellation and second batch, network interruption, and normal close/reopen recovery. Do not modify extraction code based only on live variability; capture product identity, runtime/debug logs, and current DOM evidence first.
 
 Do not weaken extraction tests to make a failing implementation appear green. Record pre-existing failures separately from cleanup-introduced failures.

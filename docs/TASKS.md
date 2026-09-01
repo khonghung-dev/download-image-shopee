@@ -50,13 +50,17 @@ This file tracks the current architecture, not superseded implementation generat
 - [x] Task 014: canonical Vietnamese `ItemState` presentation mapping, restrained centralized status tones, normalized error display, and handled duplicate styling.
 - [x] Task 014: terminal-item overall progress, current-product/image/metadata progress, partial download counts, parser-based valid-link count, and model-derived final summaries.
 - [x] Task 014: long product/path handling, retry row stability, cancellation/verification UX, partial/duplicate/nine-image regressions, and Windows resize/DPI-safe layouts.
+- [x] Task 015: offline 100-product all-success and deterministic mixed stress, three repeated window batches, stale/duplicate callback floods, staged cancellation, cancel-to-new-batch, bridge reconnect, verification, accounting, and single-active-product regressions.
+- [x] Task 015: worker/retry cleanup, cooperative close, high-frequency progress responsiveness, network/error matrix, atomic image/metadata cleanup, marker conflict, partial/complete cross-run recovery, destination/isolation, and known nine-image regressions.
+- [x] Task 015: reproduced and fixed the one release defect found—long Unicode product folders under a deep output root could exceed the Windows atomic-marker path budget after directory creation. Folder components now use UTF-16 path units and reserve room for controlled atomic files.
+- [x] Task 015: final automated suite is 280 passed, 0 failed, 0 skipped in 57.19 seconds; the live 30-product/cancel/network/close soak checklist is prepared for developer execution.
 
 ## Frozen extraction regression
 
 - [x] Known nine-image-plus-one-video product produces nine authoritative images in the automatic flow.
 - [x] The manual extension send uses the same authoritative nine-image result path.
 
-Tasks 007A/007B/012/013/014 do not modify the extension, Native Host, gallery traversal, video filtering, or authoritative cache. Task 013 is Python desktop metadata serialization and worker-lifecycle integration only; Task 014 is desktop presentation and existing-progress signal exposure only.
+Tasks 007A/007B/012/013/014/015 do not modify the extension, Native Host, gallery traversal, video filtering, or authoritative cache. Task 013 is Python desktop metadata serialization and worker-lifecycle integration only; Task 014 is desktop presentation and existing-progress signal exposure only. Task 015 changes only desktop folder path hardening demonstrated by a Windows stress failure, plus tests and reliability documentation.
 
 ## Planned product work
 
@@ -73,3 +77,5 @@ Task 012's `.shopee-product-id` remains the only persistent folder ownership mar
 Task 013 does not add folder auto-renaming, stale-image deletion, content hashing, exports, a database/global index, a metadata migration framework, or packaging changes.
 
 Task 014 does not add a theme system, localization framework, preferences, previews, notifications, packaging, or UI-owned business state. The queue/item enums and structured download results remain authoritative; table text is presentation only.
+
+Task 015 adds no features and performs no packaging. Its evidence matrix is `docs/TASK_015_RELIABILITY_MATRIX.md`; its developer-run live checklist is `docs/TASK_015_MANUAL_SOAK.md`.
