@@ -33,7 +33,9 @@
   const NATIVE_HOST_NAME = 'com.shopee_image_downloader.bridge';
   const EXPECTED_EXTENSION_ID = 'kjkgdknadhnpigglcpjbgkkbcngclhgf';
   const PROTOCOL_VERSION = 1;
-  const PRODUCT_TIMEOUT_MS = 35000;
+  // Keep aligned with Python DEFAULT_PRODUCT_ATTEMPT_TIMEOUT_MS. Three
+  // attempts plus 1s/2s backoff form an approximately 30-second budget.
+  const PRODUCT_TIMEOUT_MS = 9000;
 
   const BridgeState = {
     DISCONNECTED: 'DISCONNECTED',
@@ -45,6 +47,7 @@
     IDLE: 'IDLE',
     OPENING: 'OPENING',
     WAITING_COMPLETE: 'WAITING_COMPLETE',
+    PAUSED_VERIFICATION: 'PAUSED_VERIFICATION',
     SENT: 'SENT',
     FAILED: 'FAILED'
   };
@@ -100,6 +103,11 @@
       ) {
         if (currentRequestState === RequestState.WAITING_COMPLETE && currentRequestId) {
           console.warn(`[BatchWorker] Verification required on worker tab: ${updatedUrl}`);
+          currentRequestState = RequestState.PAUSED_VERIFICATION;
+          if (currentTimeoutTimer) {
+            clearTimeout(currentTimeoutTimer);
+            currentTimeoutTimer = null;
+          }
           try {
             chrome.tabs.update(tabId, { active: true });
             if (tab.windowId) {

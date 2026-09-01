@@ -750,7 +750,7 @@ def test_repeated_verification_events_pause_without_attempt_or_timer_churn(
     assert pauses == [0] * 20
     assert manager.resume_verification()
     assert first.attempt == 1
-    assert first.request_id == request_id
+    assert first.request_id != request_id
     _complete_product(manager, tmp_path, 1)
     assert manager.current_item is not None
     assert manager.current_item.row_idx == 1

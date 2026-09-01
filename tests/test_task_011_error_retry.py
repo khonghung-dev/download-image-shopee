@@ -270,8 +270,12 @@ def test_verification_pause_resume_does_not_consume_retry_attempt() -> None:
     assert not manager._retry_timer.isActive()
     assert manager.resume_verification()
     assert item.attempt == 1
-    assert item.request_id == request_id
-    assert opened == [request_id, request_id]
+    resumed_request_id = item.request_id
+    assert resumed_request_id != request_id
+    assert opened == [request_id, resumed_request_id]
+
+    manager.handle_product_result(_product(request_id, 99))
+    assert item.state == ItemState.OPENING_PRODUCT
 
 
 def test_stale_result_and_error_from_previous_attempt_are_ignored() -> None:

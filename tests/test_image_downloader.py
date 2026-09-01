@@ -60,6 +60,19 @@ class ScriptedOpener:
         return outcome
 
 
+class UrlMappedOpener:
+    def __init__(self, responses: dict[str, FakeResponse]) -> None:
+        self.responses = responses
+        self.urls: list[str] = []
+        self._lock = threading.Lock()
+
+    def __call__(self, request: Any, *, timeout: float) -> FakeResponse:
+        del timeout
+        with self._lock:
+            self.urls.append(request.full_url)
+            return self.responses[request.full_url]
+
+
 def _config(**changes: object) -> DownloadConfig:
     return replace(
         DownloadConfig(
@@ -82,12 +95,12 @@ def test_three_images_keep_input_order_content_and_mime_extensions(
         "https://cdn.example/second",
         "https://cdn.example/third",
     ]
-    opener = ScriptedOpener(
-        [
-            FakeResponse(b"jpeg-one", "image/jpeg"),
-            FakeResponse(b"png-two", "image/png"),
-            FakeResponse(b"webp-three", "image/webp"),
-        ]
+    opener = UrlMappedOpener(
+        {
+            urls[0]: FakeResponse(b"jpeg-one", "image/jpeg"),
+            urls[1]: FakeResponse(b"png-two", "image/png"),
+            urls[2]: FakeResponse(b"webp-three", "image/webp"),
+        }
     )
     progress: list[tuple[int, int]] = []
     downloader = ImageDownloader(_config(), open_url=opener)
@@ -98,7 +111,7 @@ def test_three_images_keep_input_order_content_and_mime_extensions(
         progress_callback=lambda index, total: progress.append((index, total)),
     )
 
-    assert opener.urls == urls
+    assert sorted(opener.urls) == sorted(urls)
     assert progress == [(1, 3), (2, 3), (3, 3)]
     assert [item.target_path.name for item in result.items] == [
         "01.jpg",

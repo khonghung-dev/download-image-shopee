@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added Task 013's schema-versioned UTF-8 `product.json`, pure metadata builder, atomic writer, metadata error stage, and automatic/manual lifecycle coverage.
 - Added Task 014's polished PySide6 hierarchy, separate Start/Cancel/Continue controls, parser-derived URL count, model-driven status presentation, per-image/current-product progress, and reusable second-batch UI regressions.
 - Added Task 015's deterministic 100-product success/mixed stress gate, repeated-batch and callback-race coverage, staged cancellation/shutdown checks, network/filesystem/atomic-write matrix, ownership audit, and manual soak checklist.
+- Added Task 015B's cooperative Pause/Resume lifecycle, optional metadata/identity exports, atomic app-local folder registry, model-backed URL grid, split progress presentation, and bounded four-way per-product image concurrency.
 
 ### Changed
 - Consolidated the runtime around PySide6 → localhost WebSocket → Native Host → Chrome Native Messaging → service worker → content script → `extractor_core.js`.
@@ -30,6 +31,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Made marker-owned folders stable across title changes, kept unmarked/corrupt/mismatched folders untouched, and reused Task 007B to complete partial historical downloads.
 - Made each completed managed download refresh one portable metadata file from authoritative images and final current-run download results without changing marker ownership.
 - Centralized UI state labels, restrained tones, partial/existing-image counts, and terminal batch summaries in a presentation helper while keeping queue/item models authoritative.
+- Reduced the aligned desktop/extension extraction guard to 9 seconds per attempt (three attempts with one/two-second non-blocking backoff), and made verification resume use a fresh correlated request generation.
+- Redesigned the desktop and extension popup with one coordinated dark neon visual system while retaining the real foreground extension worker tab and frozen extractor/native boundaries.
+- Made `product.json` and `.shopee-product-id` independent opt-in exports, both off by default; disabling either leaves existing files untouched.
 
 ### Fixed
 - Restored manual Chrome Extension full-gallery traversal by waiting for ordered carousel media identities to advance, excluding video media, and refusing to promote a visible-only four-image window to `COMPLETE`.
@@ -37,6 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Prevented late results/errors from earlier product attempts, retry timers firing after cancellation/close, and product-level retry multiplying Task 007B image retries.
 - Prevented different URLs for one successful product from creating/downloading twice, without treating failed products or Task 011 retry attempts as duplicates.
 - Prevented long Unicode product folders under deep Windows output roots from exceeding the atomic marker temp-path budget by bounding components in UTF-16 units with resolved-root-aware reserve space.
+- Prevented extension/desktop timeout churn during verification, stale pre-verification completion, unsafe marker-free folder guessing, registry-corruption adoption, concurrent filename/result reordering, and new image submission after cooperative pause/cancel boundaries.
 
 ### Removed
 - Removed the unused Python browser-session, authentication, URL-resolver, metadata-extractor, and associated worker implementations.

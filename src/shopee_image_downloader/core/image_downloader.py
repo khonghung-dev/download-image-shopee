@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from enum import Enum
 import logging
 import os
 from pathlib import Path
 import socket
+import threading
 import time
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -36,6 +38,7 @@ DEFAULT_USER_AGENT: str = (
     "AppleWebKit/537.36 Chrome/128.0 Safari/537.36"
 )
 PART_FILE_SUFFIX: str = ".part"
+MAX_IMAGE_DOWNLOAD_WORKERS: int = 4
 
 _MIME_EXTENSIONS: dict[str, str] = {
     "image/jpeg": ".jpg",
@@ -76,6 +79,7 @@ class DownloadConfig:
     max_retry_after_seconds: float = DEFAULT_RETRY_AFTER_MAX_SECONDS
     chunk_size: int = 64 * 1024
     user_agent: str = DEFAULT_USER_AGENT
+    max_workers: int = MAX_IMAGE_DOWNLOAD_WORKERS
 
     def __post_init__(self) -> None:
         if self.connect_timeout_seconds <= 0 or self.read_timeout_seconds <= 0:
@@ -90,6 +94,10 @@ class DownloadConfig:
             raise ValueError("max_retry_after_seconds cannot be negative.")
         if self.chunk_size < 1:
             raise ValueError("chunk_size must be at least one byte.")
+        if not 1 <= self.max_workers <= MAX_IMAGE_DOWNLOAD_WORKERS:
+            raise ValueError(
+                f"max_workers must be between 1 and {MAX_IMAGE_DOWNLOAD_WORKERS}."
+            )
 
     @property
     def socket_timeout_seconds(self) -> float:
@@ -171,7 +179,7 @@ class _AttemptError(RuntimeError):
 
 
 class ImageDownloader:
-    """Download authoritative image URLs sequentially into one product folder."""
+    """Download authoritative images concurrently with ordered results."""
 
     def __init__(
         self,
@@ -185,6 +193,21 @@ class ImageDownloader:
         self._open_url = open_url
         self._sleep = sleeper
         self._monotonic = monotonic
+        self._pause_waiter: Callable[[], None] | None = None
+        self._pause_check: Callable[[], bool] | None = None
+
+    def set_pause_waiter(self, waiter: Callable[[], None] | None) -> None:
+        """Install the worker-owned cooperative pause boundary callback."""
+        self._pause_waiter = waiter
+
+    def set_pause_control(
+        self,
+        pause_check: Callable[[], bool] | None,
+        pause_waiter: Callable[[], None] | None,
+    ) -> None:
+        """Install worker-owned pause observation and boundary waiting."""
+        self._pause_check = pause_check
+        self._pause_waiter = pause_waiter
 
     def download_product_images(
         self,
@@ -201,22 +224,107 @@ class ImageDownloader:
         folder = self._validated_product_folder(product_folder)
         authoritative_images = tuple(images)
         total = len(authoritative_images)
-        results: list[ImageDownloadResult] = []
+        if total == 0:
+            return ProductDownloadResult.from_items(0, ())
 
-        for index, source_url in enumerate(authoritative_images, start=1):
-            self._raise_if_cancelled(cancel_check)
-            result = self.download_image(
-                source_url,
-                index=index,
-                total=total,
-                product_folder=folder,
-                cancel_check=cancel_check,
+        ordered_results: list[ImageDownloadResult | None] = [None] * total
+        completed = 0
+        next_index = 1
+        active: dict[Future[ImageDownloadResult], int] = {}
+        stop_event = threading.Event()
+        terminal_error: BaseException | None = None
+
+        def combined_cancel_check() -> bool:
+            return stop_event.is_set() or bool(cancel_check and cancel_check())
+
+        executor = ThreadPoolExecutor(
+            max_workers=min(self.config.max_workers, total),
+            thread_name_prefix="shopee-image",
+        )
+        try:
+            while next_index <= total or active:
+                if cancel_check is not None and cancel_check():
+                    terminal_error = DownloadCancelledError("Đã hủy tải ảnh.")
+                    stop_event.set()
+
+                while (
+                    terminal_error is None
+                    and next_index <= total
+                    and len(active) < self.config.max_workers
+                    and not self._is_pause_requested()
+                ):
+                    source_url = authoritative_images[next_index - 1]
+                    future = executor.submit(
+                        self.download_image,
+                        source_url,
+                        index=next_index,
+                        total=total,
+                        product_folder=folder,
+                        cancel_check=combined_cancel_check,
+                    )
+                    active[future] = next_index
+                    next_index += 1
+
+                if terminal_error is not None:
+                    for future in active:
+                        future.cancel()
+
+                if active:
+                    done, _pending = wait(
+                        tuple(active),
+                        return_when=FIRST_COMPLETED,
+                    )
+                    for future in sorted(done, key=lambda item: active[item]):
+                        index = active.pop(future)
+                        try:
+                            result = future.result()
+                        except DownloadCancelledError as exc:
+                            if terminal_error is None:
+                                terminal_error = exc
+                                stop_event.set()
+                        except BaseException as exc:
+                            if terminal_error is None:
+                                terminal_error = exc
+                                stop_event.set()
+                        else:
+                            ordered_results[index - 1] = result
+                            completed += 1
+                            if progress_callback is not None:
+                                progress_callback(completed, total)
+                    continue
+
+                if terminal_error is not None:
+                    break
+
+                self._raise_if_cancelled(cancel_check)
+                if self._pause_waiter is not None:
+                    self._pause_waiter()
+                self._raise_if_cancelled(cancel_check)
+
+            if terminal_error is not None:
+                raise terminal_error
+        finally:
+            if terminal_error is not None or bool(cancel_check and cancel_check()):
+                stop_event.set()
+                for future in active:
+                    future.cancel()
+            executor.shutdown(wait=True, cancel_futures=True)
+
+        if any(result is None for result in ordered_results):
+            raise AppErrorException(
+                classify_error_code(
+                    "INTERNAL_ERROR",
+                    stage=ErrorStage.DOWNLOAD,
+                    technical_message="Concurrent downloader ended with missing results",
+                )
             )
-            results.append(result)
-            if progress_callback is not None:
-                progress_callback(index, total)
+        return ProductDownloadResult.from_items(
+            total,
+            tuple(result for result in ordered_results if result is not None),
+        )
 
-        return ProductDownloadResult.from_items(total, results)
+    def _is_pause_requested(self) -> bool:
+        return bool(self._pause_check and self._pause_check())
 
     def download_image(
         self,

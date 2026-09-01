@@ -29,6 +29,9 @@ from shopee_image_downloader.storage.product_folder import (
     ProductFolderError,
     ensure_product_folder,
 )
+from shopee_image_downloader.storage.product_registry import (
+    ProductIdentityRegistry,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +43,10 @@ class _DownloadRunContext:
     product: BridgeProductData
     output_root: str
     cancel_event: threading.Event
+    run_event: threading.Event
+    export_metadata: bool
+    export_identity_marker: bool
+    identity_registry: ProductIdentityRegistry
     terminal_kind: str | None = None
     result: ProductDownloadResult | None = None
     error_code: str | None = None
@@ -48,10 +55,11 @@ class _DownloadRunContext:
 
 
 class ImageDownloadWorker(QObject):
-    """Create one product folder, then run its blocking image loop."""
+    """Create one product folder, then run its background image pipeline."""
 
     folder_ready = Signal(object)
     progress = Signal(object, int, int)
+    paused = Signal(object)
     metadata_started = Signal(object)
     done = Signal()
 
@@ -75,6 +83,8 @@ class ImageDownloadWorker(QObject):
                     self._context.product.product_name,
                     self._context.product.shop_id,
                     self._context.product.item_id,
+                    create_marker=self._context.export_identity_marker,
+                    registry=self._context.identity_registry,
                 )
             except ProductFolderError as exc:
                 logger.exception(
@@ -95,7 +105,20 @@ class ImageDownloadWorker(QObject):
             self._raise_if_cancelled()
             self.folder_ready.emit(self._context.product)
 
+            pause_setter = getattr(self._downloader, "set_pause_waiter", None)
+            pause_controller = getattr(
+                self._downloader,
+                "set_pause_control",
+                None,
+            )
             try:
+                if callable(pause_controller):
+                    pause_controller(
+                        lambda: not self._context.run_event.is_set(),
+                        self._wait_if_paused,
+                    )
+                elif callable(pause_setter):
+                    pause_setter(self._wait_if_paused)
                 result = self._downloader.download_product_images(
                     self._context.product.images,
                     product_folder,
@@ -133,26 +156,32 @@ class ImageDownloadWorker(QObject):
                 )
                 self._context.product = completed_product
                 self._raise_if_cancelled()
-                self.metadata_started.emit(completed_product)
-                try:
-                    metadata = build_product_metadata(
-                        completed_product,
-                        result,
-                    )
-                    write_product_metadata(product_folder, metadata)
-                except AppErrorException as exc:
-                    logger.exception(
-                        "Không thể ghi metadata cho %s: "
-                        "code=%s stage=%s technical=%s",
-                        completed_product.product_key,
-                        exc.error.error_code,
-                        exc.error.stage.value,
-                        exc.error.technical_message,
-                    )
-                    self._set_failure(exc.error)
-                    return
+                if self._context.export_metadata:
+                    self.metadata_started.emit(completed_product)
+                    try:
+                        metadata = build_product_metadata(
+                            completed_product,
+                            result,
+                        )
+                        write_product_metadata(product_folder, metadata)
+                    except AppErrorException as exc:
+                        logger.exception(
+                            "Không thể ghi metadata cho %s: "
+                            "code=%s stage=%s technical=%s",
+                            completed_product.product_key,
+                            exc.error.error_code,
+                            exc.error.stage.value,
+                            exc.error.technical_message,
+                        )
+                        self._set_failure(exc.error)
+                        return
                 self._context.result = result
                 self._context.terminal_kind = "finished"
+            finally:
+                if callable(pause_controller):
+                    pause_controller(None, None)
+                elif callable(pause_setter):
+                    pause_setter(None)
         except DownloadCancelledError:
             self._context.terminal_kind = "cancelled"
         except Exception as exc:
@@ -195,6 +224,15 @@ class ImageDownloadWorker(QObject):
         if self._context.cancel_event.is_set():
             raise DownloadCancelledError("Đã hủy tải ảnh.")
 
+    def _wait_if_paused(self) -> None:
+        """Block only this worker thread at the boundary before a new image."""
+        if self._context.run_event.is_set():
+            return
+        self.paused.emit(self._context.product)
+        while not self._context.run_event.wait(timeout=0.1):
+            self._raise_if_cancelled()
+        self._raise_if_cancelled()
+
 
 class ImageDownloadController(QObject):
     """Own and clean exactly one product pipeline QThread at a time."""
@@ -202,6 +240,7 @@ class ImageDownloadController(QObject):
     started = Signal(object)
     folder_ready = Signal(object)
     progress = Signal(object, int, int)
+    paused = Signal(object)
     metadata_started = Signal(object)
     finished = Signal(object, object)
     failed = Signal(object, str, str)
@@ -211,10 +250,14 @@ class ImageDownloadController(QObject):
     def __init__(
         self,
         downloader: ImageDownloader | None = None,
+        identity_registry: ProductIdentityRegistry | None = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self._downloader = downloader or ImageDownloader()
+        self._identity_registry = identity_registry or ProductIdentityRegistry()
+        self._export_metadata = True
+        self._export_identity_marker = True
         self._thread: QThread | None = None
         self._worker: ImageDownloadWorker | None = None
         self._context: _DownloadRunContext | None = None
@@ -249,7 +292,12 @@ class ImageDownloadController(QObject):
             ),
             output_root=str(output_root),
             cancel_event=threading.Event(),
+            run_event=threading.Event(),
+            export_metadata=self._export_metadata,
+            export_identity_marker=self._export_identity_marker,
+            identity_registry=self._identity_registry,
         )
+        context.run_event.set()
         thread = QThread(self)
         worker = ImageDownloadWorker(context, self._downloader)
         worker.moveToThread(thread)
@@ -257,6 +305,7 @@ class ImageDownloadController(QObject):
         thread.started.connect(worker.run)
         worker.folder_ready.connect(self._on_folder_ready)
         worker.progress.connect(self._on_progress)
+        worker.paused.connect(self._on_paused)
         worker.metadata_started.connect(self._on_metadata_started)
         worker.done.connect(thread.quit)
         worker.done.connect(worker.deleteLater)
@@ -270,6 +319,19 @@ class ImageDownloadController(QObject):
         thread.start()
         return True
 
+    def set_output_options(
+        self,
+        *,
+        export_metadata: bool,
+        export_identity_marker: bool,
+    ) -> bool:
+        """Snapshot UI output flags for the next product pipeline."""
+        if self.is_busy:
+            return False
+        self._export_metadata = bool(export_metadata)
+        self._export_identity_marker = bool(export_identity_marker)
+        return True
+
     def cancel(self, request_id: str | None = None) -> bool:
         """Request cooperative cancellation for the matching active pipeline."""
         context = self._context
@@ -281,6 +343,27 @@ class ImageDownloadController(QObject):
             )
             return False
         context.cancel_event.set()
+        context.run_event.set()
+        return True
+
+    def pause(self, request_id: str | None = None) -> bool:
+        """Request a pause at the next image boundary for the active product."""
+        context = self._context
+        if context is None:
+            return False
+        if request_id is not None and context.product.request_id != request_id:
+            return False
+        context.run_event.clear()
+        return True
+
+    def resume(self, request_id: str | None = None) -> bool:
+        """Wake the same paused product worker without starting a new one."""
+        context = self._context
+        if context is None:
+            return False
+        if request_id is not None and context.product.request_id != request_id:
+            return False
+        context.run_event.set()
         return True
 
     @Slot(object)
@@ -305,6 +388,14 @@ class ImageDownloadController(QObject):
             logger.debug("Bỏ qua progress của worker cũ")
             return
         self.progress.emit(product, completed, total)
+
+    @Slot(object)
+    def _on_paused(self, product: BridgeProductData) -> None:
+        context = self._context
+        if context is None or not self._matches_context(context, product):
+            logger.debug("Bỏ qua paused của worker cũ")
+            return
+        self.paused.emit(product)
 
     @Slot(object)
     def _on_metadata_started(self, product: BridgeProductData) -> None:

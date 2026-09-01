@@ -13,7 +13,6 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QLabel,
     QLineEdit,
-    QPlainTextEdit,
     QProgressBar,
     QPushButton,
     QTableWidget,
@@ -34,6 +33,7 @@ from shopee_image_downloader.storage.product_folder import (
     ensure_product_folder,
 )
 from shopee_image_downloader.ui.main_window import MainWindow
+from shopee_image_downloader.ui.url_table import UrlTableView
 from shopee_image_downloader.workers.bridge_worker import ExtensionBridgeServer
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -201,8 +201,8 @@ def test_main_window_ui_components(tmp_path: Path) -> None:
     assert window.windowTitle() == "Shopee Image Downloader"
     assert isinstance(window.bridge_title_label, QLabel)
     assert window.bridge_title_label.text() == "Chrome Extension:"
-    assert window.bridge_status_label.text() == "🔴 Chưa kết nối"
-    assert isinstance(window.url_input, QPlainTextEdit)
+    assert window.bridge_status_label.text() == "● Chưa kết nối"
+    assert isinstance(window.url_input, UrlTableView)
     assert window.url_input.placeholderText() == (
         "Dán link sản phẩm Shopee tại đây, mỗi dòng một link..."
     )
@@ -401,6 +401,8 @@ def test_main_window_batch_verification_resume_and_cancel(tmp_path: Path, qtbot)
     assert not window.start_button.isEnabled()
     assert window.continue_button.isVisibleTo(window)
     assert window.continue_button.isEnabled()
+    assert window.continue_button is window.pause_button
+    assert window.continue_button.text() == "Tiếp tục sau xác minh"
 
     window.continue_button.click()
     assert window.queue_manager.state == QueueState.RUNNING
@@ -450,9 +452,9 @@ def test_cancel_during_download_stops_before_next_product(
 def test_main_window_bridge_ui_status_transitions(tmp_path: Path) -> None:
     window, _, _ = _create_window(tmp_path)
     window._on_bridge_status_changed(True)
-    assert window.bridge_status_label.text() == "🟢 Đã kết nối"
+    assert window.bridge_status_label.text() == "● Đã kết nối"
     window._on_bridge_status_changed(False)
-    assert window.bridge_status_label.text() == "🔴 Mất kết nối"
+    assert window.bridge_status_label.text() == "● Mất kết nối"
     window.close()
 
 

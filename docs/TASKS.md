@@ -46,7 +46,7 @@ This file tracks the current architecture, not superseded implementation generat
 - [x] Task 013: automatic and manual managed lifecycles write metadata after downloads; metadata failures use the Task 011 `METADATA` stage without deleting images.
 - [x] Task 013: cross-run metadata refresh, marker independence, same-batch duplicate no-rewrite, partial/skipped-existing, and nine-image regressions.
 - [x] Task 014: production-ready visual hierarchy for URL input, output folder, primary/secondary actions, batch progress, product results, and final summary.
-- [x] Task 014: separate Start/Cancel/verification Continue controls with active-batch input locking, single-shot cancellation, and reusable second-batch state.
+- [x] Task 014/015B: Start, Cancel, and one state-aware Pause/Resume/verification-Continue control with active-batch input locking, single-shot cancellation, and reusable second-batch state.
 - [x] Task 014: canonical Vietnamese `ItemState` presentation mapping, restrained centralized status tones, normalized error display, and handled duplicate styling.
 - [x] Task 014: terminal-item overall progress, current-product/image/metadata progress, partial download counts, parser-based valid-link count, and model-derived final summaries.
 - [x] Task 014: long product/path handling, retry row stability, cancellation/verification UX, partial/duplicate/nine-image regressions, and Windows resize/DPI-safe layouts.
@@ -54,13 +54,20 @@ This file tracks the current architecture, not superseded implementation generat
 - [x] Task 015: worker/retry cleanup, cooperative close, high-frequency progress responsiveness, network/error matrix, atomic image/metadata cleanup, marker conflict, partial/complete cross-run recovery, destination/isolation, and known nine-image regressions.
 - [x] Task 015: reproduced and fixed the one release defect found—long Unicode product folders under a deep output root could exceed the Windows atomic-marker path budget after directory creation. Folder components now use UTF-16 path units and reserve room for controlled atomic files.
 - [x] Task 015: final automated suite is 280 passed, 0 failed, 0 skipped in 57.19 seconds; the live 30-product/cancel/network/close soak checklist is prepared for developer execution.
+- [x] Task 015B: reduced the aligned desktop/extension extraction attempt timeout from 35,000 ms to 9,000 ms, preserving three attempts and non-blocking one/two-second retry backoff for an exact 30-second modeled maximum.
+- [x] Task 015B: cooperative user pause/resume across extraction, retry, image download, and between-product boundaries; cancellation remains available, and verification resumes with a fresh transport generation while preserving the logical attempt.
+- [x] Task 015B: independent optional `product.json` and `.shopee-product-id` exports, both off by default, with no deletion when off and a safe atomic app-local registry for marker-free cross-run folder identity.
+- [x] Task 015B: model-backed spreadsheet-style URL grid, draggable vertical input/results split, separate right-side progress percentage, and coordinated neon dark desktop/extension presentation.
+- [x] Task 015B: bounded four-way image concurrency inside one product while products remain strictly sequential; authoritative index/filename/result order, pause drain, cancellation cleanup, and per-image fault isolation are preserved.
+- [x] Task 015B: no headless/zero-tab rewrite, no extractor/content/popup-controller/native-host/manifest behavior change, no new automation dependencies, and no executable build.
+- [x] Task 015B: untouched baseline 280 passed, 0 failed, 0 skipped in 49.39 seconds; final offline suite 307 passed, 0 failed, 0 skipped in 32.59 seconds. Live acceptance remains manual.
 
 ## Frozen extraction regression
 
 - [x] Known nine-image-plus-one-video product produces nine authoritative images in the automatic flow.
 - [x] The manual extension send uses the same authoritative nine-image result path.
 
-Tasks 007A/007B/012/013/014/015 do not modify the extension, Native Host, gallery traversal, video filtering, or authoritative cache. Task 013 is Python desktop metadata serialization and worker-lifecycle integration only; Task 014 is desktop presentation and existing-progress signal exposure only. Task 015 changes only desktop folder path hardening demonstrated by a Windows stress failure, plus tests and reliability documentation.
+Tasks 007A/007B/012/013/014/015 do not modify the extension, Native Host, gallery traversal, video filtering, or authoritative cache. Task 013 is Python desktop metadata serialization and worker-lifecycle integration only; Task 014 is desktop presentation and existing-progress signal exposure only. Task 015 changes only desktop folder path hardening demonstrated by a Windows stress failure, plus tests and reliability documentation. Task 015B changes `background.js` only for the aligned timeout and verification timer/state handling, and changes `popup.html` only for presentation; `extractor_core.js`, `content.js`, `popup.js`, `manifest.json`, and the Native Host remain frozen.
 
 ## Planned product work
 
@@ -72,10 +79,12 @@ Task 010 does not change the Chrome Extension, Native Host, extraction protocol,
 
 Task 011 adds automatic retries only for transient product opening/extraction failures. It does not add a manual retry button, rerun completed failed batches, change duplicate-product semantics, modify the extension/native architecture, or retry a whole product after Task 007B returns partial image failures.
 
-Task 012's `.shopee-product-id` remains the only persistent folder ownership marker. Task 013's `product.json` is portable product/output metadata and is never used to adopt an unmarked folder.
+Task 015B makes Task 012's `.shopee-product-id` optional and adds a small app-local registry as the marker-free ownership mechanism. Exact marker evidence remains authoritative. Task 013's `product.json` is optional portable product/output metadata and is never used to adopt an unmarked folder.
 
-Task 013 does not add folder auto-renaming, stale-image deletion, content hashing, exports, a database/global index, a metadata migration framework, or packaging changes.
+Task 013/015B does not add folder auto-renaming, stale-image deletion, content hashing, a content catalog, metadata migration framework, or packaging changes. The Task 015B registry stores only normalized output-root/product-key-to-relative-folder mappings.
 
 Task 014 does not add a theme system, localization framework, preferences, previews, notifications, packaging, or UI-owned business state. The queue/item enums and structured download results remain authoritative; table text is presentation only.
 
 Task 015 adds no features and performs no packaging. Its evidence matrix is `docs/TASK_015_RELIABILITY_MATRIX.md`; its developer-run live checklist is `docs/TASK_015_MANUAL_SOAK.md`.
+
+Task 015B's live nine-image flow, actual failing-product timing, and 30-product soak remain developer-run manual acceptance gates. Automated tests do not access Shopee or personal Chrome profiles.

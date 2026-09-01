@@ -9,20 +9,21 @@ The suite is offline and protects the current architecture rather than deleted i
 | `test_app.py` | QApplication and desktop bootstrap |
 | `test_url_validator.py` | Multiline parsing, accepted Shopee domains, invalid input, exact deduplication |
 | `test_settings.py` | Output-folder persistence and restoration |
-| `test_batch_queue.py` | FIFO order, one in-flight request, correlation, failure continuation, timeout, verification, cancellation |
+| `test_batch_queue.py` | FIFO order, one in-flight product, correlation, failure continuation, timeout, pause/verification, cancellation |
 | `test_bridge_protocol.py` | Directional active protocol, validation, size/version checks, product integrity |
 | `test_bridge_server.py` | Loopback Qt WebSocket handshake, product receipt, disconnect/reconnect |
 | `test_native_messaging.py` | Four-byte framing, host manifest, offline/online relay, payload preservation |
 | `test_extension_extractor.py` | Real JavaScript extractor behavior, service-worker state, worker tab, canonical sender, architecture boundaries |
 | `test_ui.py` | Current widgets, start guard, queue/bridge integration, single row updates, manual deduplication |
 | `test_product_folder.py` | Unicode/Windows sanitization, device names, fallback and length policy, containment, output-root failures, and identity-suffixed collisions |
-| `test_image_downloader.py` | Ordered filenames, MIME extensions, bounded retries/timeouts, invalid responses, atomic cleanup, existing-file skip, nine-image model integration, cancellation, and QThread execution |
+| `test_image_downloader.py` | Ordered filenames/results, MIME extensions, bounded retries/timeouts and image concurrency, invalid responses, atomic cleanup, existing-file skip, nine-image model integration, cancellation, and QThread execution |
 | `test_task_010_batch_reliability.py` | 10-item FIFO execution, middle-stage failure continuation, stale extraction/worker events, double start, cancellation terminalization, product isolation, GUI responsiveness, worker cleanup, and close-during-download |
 | `test_task_011_error_retry.py` | Canonical classification, product retry/exhaustion, verification, stale attempt generations, 429/4xx/5xx policy, permission/disk full, cancellation/close backoff safety, multi-product totals, and nine-image preservation |
 | `test_task_012_duplicate_handling.py` | Canonical product keys, atomic markers, cross-run reuse/collisions, duplicate claims, same-batch skip, failure/retry distinctions, partial/complete reuse, zero-byte replacement, and image preservation |
 | `test_task_013_product_metadata.py` | Schema/identity/source fields, readable UTF-8, image order/filenames/statuses, partial/skipped summaries, atomic replacement/failure, marker independence, automatic/manual lifecycles, duplicate no-rewrite, and nine-image preservation |
-| `test_task_014_ui_polish.py` | Initial/running/finished/cancelled UI states, parser-derived URL count, retry/duplicate/partial displays, per-image and metadata progress, long content, row stability, and second-batch reuse |
+| `test_task_014_ui_polish.py` | Initial/running/paused/finished/cancelled UI states, parser-derived URL count, retry/duplicate/partial displays, per-image and metadata progress, long content, row stability, and second-batch reuse |
 | `test_task_015_reliability.py` | 100-product all-success/mixed stress, repeated batches, stale/duplicate signals, staged cancellation, cancel-to-new-batch, bridge reconnect, verification, network/temp-file matrix, metadata recovery, 5/9 partial recovery, reprocessing, title/path stress, progress flood, ownership audit, and nine-image end-to-end metadata |
+| `test_task_015b_pre_release.py` | 30-second product timeout budget, desktop/extension alignment, cooperative pause boundaries, verification generation safety, optional sidecar matrix/registry recovery, URL grid editing/paste/copy, progress placement, bounded image concurrency/order/pause/cancel/failure |
 
 Deleted Playwright authentication, Python metadata-extractor, URL-resolver, and workaround-protocol tests are not part of the active suite.
 
@@ -66,17 +67,18 @@ JavaScript syntax checks require Node.js and are invoked by `test_extension_extr
 - Whitespace is collapsed while Vietnamese/Unicode text remains unchanged.
 - Trailing dots/spaces, reserved device basenames, empty titles, and overlong titles are made safe deterministically.
 - Path-like titles remain a single component whose resolved target is a direct child of the selected existing output root.
-- Every newly managed folder receives an atomic `.shopee-product-id` marker containing only `shop_id:item_id`.
+- With marker export enabled, a newly managed folder receives an atomic `.shopee-product-id` containing only `shop_id:item_id`; with it disabled, an atomic app-local registry records the folder instead.
 - A unique marker-owned folder is reused even when the incoming title changes; it is not renamed.
 - An unmarked, corrupt-marker, or mismatched-marker title collision is preserved and uses `<name> [<shop_id>-<item_id>]` rather than being adopted.
 - Equal titles with different product keys remain separate, while multiple valid folders claiming one key fail without modification.
 - Discovery is limited to immediate output-root children and unsafe symlink/reparse containment is never used as a managed product folder.
-- Task 007A/012 storage tests create only managed directories and their identity markers. Task 007B integration tests write controlled image files only inside those directories.
+- Storage tests create only managed directories and explicitly selected sidecars. Task 007B integration tests write controlled image files only inside those directories.
 
 ## Task 007B downloader regressions
 
 - Tests use scripted/local HTTP responses only; they never access Shopee or its CDN.
 - Input order is authoritative: index 0 maps to `01`, index 1 to `02`, and so on regardless of response characteristics.
+- At most four image transfers are active for one product; completion order cannot change final result order, filename/index mapping, or progress totals.
 - Padding is at least two digits and expands to three for a 120-image gallery.
 - Valid `image/jpeg`, `image/png`, and `image/webp` responses produce matching extensions and exact response bytes.
 - HTTP 500 and timeouts retry within the configured maximum; HTTP 404, HTML/JSON, and empty responses fail without inappropriate retries.
@@ -105,7 +107,7 @@ Task 010 tests use synthetic models, test doubles, and local filesystem paths on
 - `PRODUCT_TIMEOUT` followed by success uses the same queue item and row, creates one product folder, and starts one download pipeline.
 - Three transient failures produce exactly three total attempts; the failed item then advances to the next product.
 - `NOT_FOUND` and output/path/permission errors fail on the first attempt without a backoff timer.
-- `VERIFICATION_REQUIRED` pauses the queue; manual resume preserves the attempt count and uses no automatic retry timer.
+- `VERIFICATION_REQUIRED` pauses both transport timers; manual resume preserves the attempt count, creates one fresh request generation, and uses no automatic retry timer.
 - A new request ID is generated for each automatic attempt. Late results and errors carrying the prior ID cannot mutate or complete the current attempt.
 - Cancelling or closing during `WAITING_RETRY` stops the single-shot timer and cannot emit a later `open_product`.
 - HTTP 404 performs one request; HTTP 500 retries only to the configured maximum; HTTP 429 honors a valid `Retry-After` value clamped to the configured bound. Injected sleepers make these tests instantaneous.
@@ -122,12 +124,12 @@ Task 011 tests are offline and use Qt timers, scripted HTTP responses, injected 
 - Terminal duplicate items count toward overall `finished / total`, have no retry policy, and are shown separately in the final summary.
 - A failed or partial first item does not make a later same-key item reusable.
 - A Task 011 retry changes `request_id` for the same logical item and succeeds normally; it is not `SKIPPED_DUPLICATE`.
-- Cross-run marker reuse always invokes the current Task 007B downloader. Complete existing files are preserved/skipped, partial folders complete missing files, zero-byte targets are replaced, and `.part` cleanup remains centralized.
-- Folder discovery uses only `.shopee-product-id`; titles, input URLs, image URLs, image counts, filenames, and folder names are never identity evidence.
+- Cross-run marker or validated app-local-registry reuse always invokes the current Task 007B downloader. Complete existing files are preserved/skipped, partial folders complete missing files, zero-byte targets are replaced, and `.part` cleanup remains centralized.
+- A unique exact `.shopee-product-id` claim has precedence. Otherwise a registry mapping is accepted only for one existing, contained, non-reparse immediate child with no marker or an agreeing marker. Titles, input URLs, image URLs, image counts, and filenames are never identity evidence.
 - The nine-image authoritative list remains nine entries after same-batch resolution, marker reuse, and download completion.
 - Manual Extension → Desktop sends still update by product key and reuse the marker-owned folder without changing automatic queue state.
 
-`.shopee-product-id` is the internal identity/ownership marker; Task 013's `product.json` does not participate in folder discovery or adoption.
+`.shopee-product-id` and the small app-local registry are the two identity mechanisms; Task 013's `product.json` does not participate in folder discovery or adoption.
 
 ## Task 013 metadata regressions
 
@@ -139,16 +141,17 @@ Task 011 tests are offline and use Qt timers, scripted HTTP responses, injected 
 - Reprocessing atomically replaces one `product.json` through `product.json.tmp`; no numbered metadata or temporary file remains after success.
 - Simulated atomic-replace failure preserves completed image bytes and the prior valid metadata, produces controlled `METADATA_WRITE_ERROR` at `ErrorStage.METADATA`, and leaves no corrupted final JSON.
 - A title change reuses the marker-owned folder but refreshes `product_name`; missing metadata does not weaken marker reuse, and metadata alone never claims an unmarked folder.
-- Automatic and manual Extension → Desktop managed workers share the one metadata writer after their final download result.
+- When selected, automatic and manual Extension → Desktop managed workers share the one metadata writer after their final download result; when off, they leave existing metadata untouched.
 - A same-batch `SKIPPED_DUPLICATE` performs no second download, folder creation, or metadata rewrite.
 
 Task 013 tests use local synthetic models and downloader doubles only. They do not access Shopee, store sensitive values or absolute local paths, alter extraction code, delete stale images, rename folders, or add a catalog/database.
 
 ## Task 014 UI regressions
 
-- Initial state keeps URL/output controls available, Start reusable under the existing validation behavior, Cancel disabled, and overall progress at zero.
-- Running state disables Start and input/output editing, enables one Cancel action, shows `Sản phẩm finished/total`, and keeps image progress separate.
-- Verification pauses the queue with Start disabled, Cancel available, an explicit `Tiếp tục` action, and concise Chrome instructions; it does not start an automatic retry timer.
+- Initial state keeps URL/output/optional-export controls available, Start reusable under the existing validation behavior, Pause/Cancel disabled, and overall progress at zero.
+- Running state disables Start and input/output editing, enables Pause and one Cancel action, shows `Sản phẩm finished/total`, and keeps image progress separate.
+- User pause reaches a cooperative extraction/download/between-product boundary, exposes `Tiếp tục`, and neither starts the next product nor duplicates the worker pipeline.
+- Verification pauses the queue with Start disabled, Cancel available, the same button reading `Tiếp tục sau xác minh`, concise Chrome instructions, and no automatic retry timer.
 - Retry presentation shows `Đang thử lại 2/3...` on the same queue item and table row across the new transport request ID.
 - Success, partial, failure, duplicate, and cancellation text comes from authoritative `ItemState`/download results. `SKIPPED_DUPLICATE` is handled rather than red failure, and `SKIPPED_EXISTING` contributes to available images.
 - A nine-image result renders `9/9` after success without mutating the nine-entry authoritative model. A partial eight-of-nine result renders `8/9` and never claims `9/9` success.
@@ -181,5 +184,19 @@ The Task 015 failure evidence was a 273-UTF-16-unit atomic marker temp path crea
 The ownership audit treats `BatchQueueManager._known_request_ids` as deliberate session-lifetime tombstones: old automatic request IDs must remain recognizable so a late result can never be reinterpreted as a manual Extension send while the window is idle. The repeated audit recorded exactly one tombstone per issued generation (100 IDs), while live queue items/reusable products are replaced per batch, UI row maps are cleared per batch, both timers are inactive at terminal state, and controller worker/thread/context references are released. This safety history is intentional rather than a worker/timer leak.
 
 The executed evidence ledger is `docs/TASK_015_RELIABILITY_MATRIX.md`. Live Shopee remains manual-only; use `docs/TASK_015_MANUAL_SOAK.md` for the 30+ URL sequential soak, known 9-image automatic/manual check, 20+ URL cancellation and second batch, network interruption, and normal close/reopen recovery. Do not modify extraction code based only on live variability; capture product identity, runtime/debug logs, and current DOM evidence first.
+
+## Task 015B pre-release gate
+
+The untouched Task 015 baseline completed with 280 passed, 0 failed, and 0 skipped in 49.39 seconds. After Task 015B, the final full suite completed with 307 passed, 0 failed, and 0 skipped in 32.59 seconds. Task 015B adds offline, deterministic regressions for:
+
+- one canonical 9,000 ms product-attempt timeout in Python and the extension, three total attempts, one/two-second non-blocking backoff, and an exact modeled maximum of 30 seconds;
+- one state-aware Pause/Resume/verification button, safe extraction/retry/download/between-product boundaries, cancellation while paused, reusable new batches, and fresh verification request correlation;
+- four independent `product.json`/`.shopee-product-id` option combinations, both off by default, no deletion when off, marker precedence, durable marker-free registry reuse, corrupt/stale/conflicting registry recovery, and atomic registry failure safety;
+- the model-backed URL grid's structural trailing row, single-click selection, double-click/F2 editing, Delete, multiline paste, exact multiline copy, keyboard navigation, and unchanged canonical URL parsing/deduplication;
+- right-side `0%`/`40%`/`100%` progress text and resize-safe splitter/card layout;
+- at most four concurrent images within one product, strictly sequential products, authoritative filename/result order, cooperative pause drain, cancellation cleanup, and isolation of one failed image;
+- frozen extraction/native boundaries, JavaScript syntax, and the unchanged single canonical extractor/result builder.
+
+Live Chrome/Shopee acceptance is intentionally manual because automated tests must not access a personal Chrome profile or depend on live Shopee state. Before packaging, a developer must still verify the known nine-image product end to end, measure an actual repeatedly failing product, and perform the 30-product mixed-output soak including pause, cancel, verification, and a second batch. Task 015B does not build an executable.
 
 Do not weaken extraction tests to make a failing implementation appear green. Record pre-existing failures separately from cleanup-introduced failures.

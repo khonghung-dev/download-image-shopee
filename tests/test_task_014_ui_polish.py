@@ -48,10 +48,53 @@ def test_initial_ui_state_is_clear_and_idle(tmp_path: Path) -> None:
     assert window.url_input.isEnabled()
     assert window.output_folder_input.isEnabled()
     assert window.select_folder_button.isEnabled()
+    assert not window.export_metadata_checkbox.isChecked()
+    assert not window.export_marker_checkbox.isChecked()
+    assert window.export_metadata_checkbox.isEnabled()
+    assert window.export_marker_checkbox.isEnabled()
     assert window.progress_bar.value() == 0
+    assert not window.progress_bar.isTextVisible()
+    assert window.progress_percent_label.text() == "0%"
     assert window.batch_progress_label.text() == "Sản phẩm 0/0"
     assert window.current_product_label.text() == "Chưa bắt đầu xử lý."
     assert window.status_label.text() == "Chưa có sản phẩm nào được xử lý."
+    window.close()
+
+
+def test_percentage_is_rendered_to_the_right_of_progress_bar(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window, _, _ = _create_window(tmp_path)
+    qtbot.addWidget(window)
+    window.show()
+    qtbot.wait(10)
+
+    for value in (0, 40, 100):
+        window.progress_bar.setValue(value)
+        assert window.progress_percent_label.text() == f"{value}%"
+    assert not window.progress_bar.isTextVisible()
+    assert window.progress_percent_label.geometry().left() >= (
+        window.progress_bar.geometry().right()
+    )
+    window.close()
+
+
+def test_default_layout_gives_url_grid_the_requested_larger_height(
+    tmp_path: Path,
+    qtbot,
+) -> None:
+    window, _, _ = _create_window(tmp_path)
+    qtbot.addWidget(window)
+    window.show()
+    qtbot.wait(10)
+
+    # The former editor's default minimum was 82 px. The redesigned default
+    # keeps roughly 2.5 times that space while the window remains resizable.
+    assert window.url_input.height() >= 180
+    assert window.content_splitter.sizes()[0] > (
+        window.content_splitter.sizes()[1]
+    )
     window.close()
 
 
@@ -85,11 +128,52 @@ def test_running_state_locks_inputs_and_shows_overall_progress(
     assert not window.url_input.isEnabled()
     assert not window.output_folder_input.isEnabled()
     assert not window.select_folder_button.isEnabled()
+    assert not window.export_metadata_checkbox.isEnabled()
+    assert not window.export_marker_checkbox.isEnabled()
     assert window.batch_progress_label.text() == "Sản phẩm 0/1"
     assert window.current_product_label.text() == (
         "Sản phẩm 1/1 — Đang mở sản phẩm"
     )
     window.cancel_button.click()
+    window.close()
+
+
+def test_pause_button_waits_for_extraction_boundary_and_resumes_once(
+    tmp_path: Path,
+) -> None:
+    controller = ImmediateImageDownloadController()
+    window, _, _ = _create_window(
+        tmp_path,
+        connected=True,
+        with_output_folder=True,
+        image_download_controller=controller,
+    )
+    window.url_input.setPlainText("https://shopee.vn/product-pause")
+    window.start_button.click()
+    request_id = window.queue_manager.current_item.request_id
+
+    assert window.pause_button.text() == "Tạm dừng"
+    assert window.pause_button.isEnabled()
+    window.pause_button.click()
+
+    assert window.queue_manager.state == QueueState.PAUSE_REQUESTED
+    assert window.pause_button.text() == "Đang tạm dừng..."
+    assert not window.pause_button.isEnabled()
+
+    window._on_bridge_product_received(_product(request_id=request_id))
+
+    assert window.queue_manager.state == QueueState.PAUSED_USER
+    assert window.pause_button.text() == "Tiếp tục"
+    assert window.pause_button.isEnabled()
+    assert controller.start_calls == []
+
+    window.pause_button.click()
+
+    assert window.queue_manager.state == QueueState.IDLE
+    assert controller.start_calls == ["1001:2001"]
+    assert window.pause_button.text() == "Tạm dừng"
+    assert not window.pause_button.isEnabled()
+    assert window.start_button.isEnabled()
     window.close()
 
 

@@ -12,6 +12,7 @@ from PySide6.QtCore import QObject, QTimer, Signal
 from shopee_image_downloader.core.bridge_protocol import BridgeProductData
 from shopee_image_downloader.core.error_policy import (
     AppError,
+    DEFAULT_PRODUCT_ATTEMPT_TIMEOUT_MS,
     ErrorCategory,
     ErrorStage,
     RetryPolicy,
@@ -21,7 +22,7 @@ from shopee_image_downloader.core.error_policy import (
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_ITEM_TIMEOUT_MS: int = 35000
+DEFAULT_ITEM_TIMEOUT_MS: int = DEFAULT_PRODUCT_ATTEMPT_TIMEOUT_MS
 
 
 class QueueState(str, Enum):
@@ -29,6 +30,8 @@ class QueueState(str, Enum):
 
     IDLE = "IDLE"
     RUNNING = "RUNNING"
+    PAUSE_REQUESTED = "PAUSE_REQUESTED"
+    PAUSED_USER = "PAUSED_USER"
     PAUSED_VERIFICATION = "PAUSED_VERIFICATION"
     CANCELLING = "CANCELLING"
     COMPLETED = "COMPLETED"
@@ -145,6 +148,7 @@ class QueueItem:
     max_attempts: int = 1
     next_retry_delay: float | None = None
     last_error: AppError | None = None
+    pipeline_started: bool = False
 
     @property
     def url(self) -> str:
@@ -173,6 +177,8 @@ class BatchQueueManager(QObject):
     batch_finished = Signal(int, int, list)  # success, failed, item snapshot
     send_open_product_requested = Signal(str, str)
     send_cancel_requested = Signal(str)
+    pause_download_requested = Signal(str)
+    resume_download_requested = Signal(str)
     cancel_download_requested = Signal(str)
 
     def __init__(
@@ -213,9 +219,21 @@ class BatchQueueManager(QObject):
         """Return whether a batch owns the UI, including pause/cancellation."""
         return self._state in {
             QueueState.RUNNING,
+            QueueState.PAUSE_REQUESTED,
+            QueueState.PAUSED_USER,
             QueueState.PAUSED_VERIFICATION,
             QueueState.CANCELLING,
         }
+
+    @property
+    def is_paused_by_user(self) -> bool:
+        """Return whether the queue reached a cooperative user pause boundary."""
+        return self._state == QueueState.PAUSED_USER
+
+    @property
+    def is_pause_requested(self) -> bool:
+        """Return whether the queue is draining toward a safe pause boundary."""
+        return self._state == QueueState.PAUSE_REQUESTED
 
     @property
     def is_paused_for_verification(self) -> bool:
@@ -323,6 +341,73 @@ class BatchQueueManager(QObject):
         self._process_current_item()
         return True
 
+    def request_user_pause(self) -> bool:
+        """Request a cooperative pause without invalidating active work."""
+        if self._state != QueueState.RUNNING:
+            return False
+        item = self.current_item
+        if item is None:
+            return False
+
+        self._set_state(QueueState.PAUSE_REQUESTED)
+        if item.state == ItemState.WAITING_RETRY:
+            self._retry_timer.stop()
+            self._set_state(QueueState.PAUSED_USER)
+        elif item.state in {
+            ItemState.CREATING_FOLDER,
+            ItemState.DOWNLOADING,
+        }:
+            self.pause_download_requested.emit(item.request_id)
+        elif item.state == ItemState.PENDING or item.is_finished:
+            self._set_state(QueueState.PAUSED_USER)
+        # Extraction keeps its current timeout/result correlation alive. Its
+        # next meaningful stage becomes the pause boundary.
+        return True
+
+    def resume_user_pause(self) -> bool:
+        """Resume the same logical item from its recorded safe boundary."""
+        if self._state != QueueState.PAUSED_USER:
+            return False
+        item = self.current_item
+        if item is None:
+            return False
+
+        self._set_state(QueueState.RUNNING)
+        if item.is_finished:
+            self._advance_queue(item.request_id)
+        elif item.state == ItemState.WAITING_RETRY:
+            self._on_retry_timeout()
+        elif item.state == ItemState.CREATING_FOLDER:
+            if item.product_data is None:
+                return False
+            self._start_download_pipeline(item)
+        elif item.state == ItemState.DOWNLOADING:
+            self.resume_download_requested.emit(item.request_id)
+        elif item.state == ItemState.PENDING:
+            self._process_current_item()
+        else:
+            logger.warning(
+                "Không thể tiếp tục user pause từ trạng thái %s",
+                item.state.value,
+            )
+            self._set_state(QueueState.PAUSED_USER)
+            return False
+        return True
+
+    def _accepts_active_callbacks(self) -> bool:
+        """Return whether current in-flight work may reach a safe boundary."""
+        return self._state in {
+            QueueState.RUNNING,
+            QueueState.PAUSE_REQUESTED,
+        }
+
+    def _start_download_pipeline(self, item: QueueItem) -> None:
+        """Publish one worker start for the current logical item exactly once."""
+        if item.product_data is None or item.pipeline_started:
+            return
+        item.pipeline_started = True
+        self.item_download_requested.emit(item.row_idx, item.product_data)
+
     def _process_current_item(self, *, verification_resume: bool = False) -> None:
         """Dispatch current once, except an explicit verification resume."""
         if self._state != QueueState.RUNNING:
@@ -385,7 +470,7 @@ class BatchQueueManager(QObject):
 
     def handle_process_progress(self, request_id: str, stage: str) -> None:
         """Accept correlated extraction progress without allowing regression."""
-        if self._state != QueueState.RUNNING:
+        if not self._accepts_active_callbacks():
             return
         item = self.current_item
         if item is None or item.request_id != request_id:
@@ -425,7 +510,7 @@ class BatchQueueManager(QObject):
 
     def handle_product_result(self, product_data: BridgeProductData) -> None:
         """Accept one correlated extraction result and request its worker pipeline."""
-        if self._state != QueueState.RUNNING:
+        if not self._accepts_active_callbacks():
             return
         item = self.current_item
         if item is None or product_data.request_id != item.request_id:
@@ -522,11 +607,14 @@ class BatchQueueManager(QObject):
             item.stage,
             STATUS_DISPLAY_CREATING_FOLDER,
         )
-        self.item_download_requested.emit(item.row_idx, product_snapshot)
+        if self._state == QueueState.PAUSE_REQUESTED:
+            self._set_state(QueueState.PAUSED_USER)
+            return
+        self._start_download_pipeline(item)
 
     def handle_product_folder_ready(self, product_data: BridgeProductData) -> None:
         """Enter downloading after the worker creates the correlated folder."""
-        if self._state != QueueState.RUNNING:
+        if not self._accepts_active_callbacks():
             return
         item = self.current_item
         if not self._matches_product(item, product_data, require_folder=False):
@@ -568,7 +656,7 @@ class BatchQueueManager(QObject):
         total: int,
     ) -> None:
         """Accept progress only for the owned request, product, and folder."""
-        if self._state != QueueState.RUNNING:
+        if not self._accepts_active_callbacks():
             return
         item = self.current_item
         if (
@@ -596,7 +684,7 @@ class BatchQueueManager(QObject):
 
     def handle_metadata_started(self, product_data: BridgeProductData) -> None:
         """Expose the existing metadata phase for correlated UI presentation."""
-        if self._state != QueueState.RUNNING:
+        if not self._accepts_active_callbacks():
             return
         item = self.current_item
         if (
@@ -615,7 +703,7 @@ class BatchQueueManager(QObject):
 
     def handle_download_result(self, product_data: BridgeProductData) -> None:
         """Finalize only after the correlated worker is fully cleaned."""
-        if self._state != QueueState.RUNNING:
+        if not self._accepts_active_callbacks():
             return
         item = self.current_item
         if (
@@ -662,7 +750,7 @@ class BatchQueueManager(QObject):
         message: str,
     ) -> None:
         """Finalize a correlated folder/downloader failure and continue."""
-        if self._state != QueueState.RUNNING:
+        if not self._accepts_active_callbacks():
             return
         item = self.current_item
         if (
@@ -696,7 +784,7 @@ class BatchQueueManager(QObject):
         """Handle a synchronous controller start failure."""
         item = self.current_item
         if (
-            self._state != QueueState.RUNNING
+            not self._accepts_active_callbacks()
             or item is None
             or item.request_id != request_id
             or item.state != ItemState.CREATING_FOLDER
@@ -720,6 +808,7 @@ class BatchQueueManager(QObject):
         """Handle one correlated extraction failure or verification challenge."""
         if self._state not in {
             QueueState.RUNNING,
+            QueueState.PAUSE_REQUESTED,
             QueueState.PAUSED_VERIFICATION,
         }:
             return
@@ -764,21 +853,38 @@ class BatchQueueManager(QObject):
         self._fail_current_item(error)
 
     def resume_verification(self) -> bool:
-        """Explicitly redispatch the same request after verification."""
+        """Redispatch the same item with a fresh transport generation."""
         if self._state != QueueState.PAUSED_VERIFICATION:
             return False
         item = self.current_item
         if item is None or item.state != ItemState.WAITING_EXTRACTION:
             logger.warning("Không có item xác minh hợp lệ để tiếp tục")
             return False
+        self._replace_request_generation(item)
         self._set_state(QueueState.RUNNING)
         self._process_current_item(verification_resume=True)
         return True
+
+    def handle_download_paused(self, product_data: BridgeProductData) -> None:
+        """Publish a user pause only after the worker reaches its boundary."""
+        if self._state != QueueState.PAUSE_REQUESTED:
+            return
+        item = self.current_item
+        if (
+            item is None
+            or item.state != ItemState.DOWNLOADING
+            or not self._matches_product(item, product_data, require_folder=True)
+        ):
+            logger.debug("Bỏ qua paused callback cũ/lệch")
+            return
+        self._set_state(QueueState.PAUSED_USER)
 
     def cancel_batch(self) -> bool:
         """Begin deterministic cooperative cancellation of the active batch."""
         if self._state not in {
             QueueState.RUNNING,
+            QueueState.PAUSE_REQUESTED,
+            QueueState.PAUSED_USER,
             QueueState.PAUSED_VERIFICATION,
         }:
             return False
@@ -799,10 +905,12 @@ class BatchQueueManager(QObject):
             self._finish_cancelled_batch()
             return True
 
-        if item.state in {
-            ItemState.CREATING_FOLDER,
-            ItemState.DOWNLOADING,
-        }:
+        if item.state == ItemState.CREATING_FOLDER and not item.pipeline_started:
+            self._cancel_item(item)
+            self._finish_cancelled_batch()
+            return True
+
+        if item.state in {ItemState.CREATING_FOLDER, ItemState.DOWNLOADING}:
             self.cancel_download_requested.emit(item.request_id)
             return True
 
@@ -839,7 +947,7 @@ class BatchQueueManager(QObject):
         """Turn one unexpected boundary exception into a controlled failure."""
         item = self.current_item
         if (
-            self._state != QueueState.RUNNING
+            not self._accepts_active_callbacks()
             or item is None
             or item.request_id != request_id
             or item.is_finished
@@ -908,7 +1016,7 @@ class BatchQueueManager(QObject):
         )
 
     def _on_item_timeout(self) -> None:
-        if self._state != QueueState.RUNNING:
+        if not self._accepts_active_callbacks():
             return
         item = self.current_item
         if item is None or item.state not in {
@@ -968,7 +1076,15 @@ class BatchQueueManager(QObject):
             item.stage,
             f"Đang thử lại {next_attempt}/{item.max_attempts}...",
         )
+        if self._state == QueueState.PAUSE_REQUESTED:
+            self._set_state(QueueState.PAUSED_USER)
+            return
         self._retry_timer.start(max(0, round(delay * 1000)))
+
+    def _replace_request_generation(self, item: QueueItem) -> None:
+        """Tombstone the old transport ID and assign a fresh correlated ID."""
+        item.request_id = f"req-{uuid.uuid4().hex[:12]}"
+        self._known_request_ids.add(item.request_id)
 
     def _on_retry_timeout(self) -> None:
         """Start the next transport generation for the same queue item."""
@@ -978,13 +1094,15 @@ class BatchQueueManager(QObject):
         if item is None or item.state != ItemState.WAITING_RETRY:
             return
         item.attempt += 1
-        item.request_id = f"req-{uuid.uuid4().hex[:12]}"
-        self._known_request_ids.add(item.request_id)
+        self._replace_request_generation(item)
         self._process_current_item(verification_resume=True)
 
     def _advance_queue(self, finalized_request_id: str) -> None:
         """Advance exactly once from the current terminal item."""
-        if self._state != QueueState.RUNNING:
+        if self._state not in {
+            QueueState.RUNNING,
+            QueueState.PAUSE_REQUESTED,
+        }:
             return
         item = self.current_item
         if (
@@ -993,6 +1111,9 @@ class BatchQueueManager(QObject):
             or not item.is_finished
         ):
             logger.warning("Bỏ qua advance không hợp lệ: %s", finalized_request_id)
+            return
+        if self._state == QueueState.PAUSE_REQUESTED:
+            self._set_state(QueueState.PAUSED_USER)
             return
         self._current_index += 1
         if self._current_index < len(self._items):

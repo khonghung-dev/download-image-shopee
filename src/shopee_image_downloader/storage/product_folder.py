@@ -1,4 +1,4 @@
-"""Marker-owned product folder resolution below one selected output root."""
+"""Durable product-folder resolution below one selected output root."""
 
 from __future__ import annotations
 
@@ -18,6 +18,10 @@ from shopee_image_downloader.core.error_policy import (
 from shopee_image_downloader.core.product_identity import (
     canonical_product_key,
     is_canonical_product_key,
+)
+from shopee_image_downloader.storage.product_registry import (
+    ProductIdentityRegistry,
+    ProductRegistryError,
 )
 
 logger = logging.getLogger(__name__)
@@ -395,13 +399,79 @@ def _write_identity_marker_atomic(folder: Path, product_key: str) -> None:
             logger.warning("Không thể xóa marker tạm: %s", temporary)
 
 
+def _registry_owned_folder(
+    root: Path,
+    product_key: str,
+    registry: ProductIdentityRegistry,
+) -> Path | None:
+    """Resolve a registry mapping only when it is a safe immediate child."""
+    folder_name = registry.get_folder(root, product_key)
+    if folder_name is None:
+        return None
+    if Path(folder_name).name != folder_name or folder_name in {".", ".."}:
+        _remove_stale_registry_mapping(root, product_key, registry)
+        return None
+    try:
+        candidate = _validated_child(root, folder_name)
+        if (
+            not _entry_exists(candidate)
+            or _is_reparse_point(candidate)
+            or candidate.resolve(strict=True).parent != root
+            or not candidate.is_dir()
+        ):
+            _remove_stale_registry_mapping(root, product_key, registry)
+            return None
+    except (OSError, RuntimeError, ProductFolderError):
+        _remove_stale_registry_mapping(root, product_key, registry)
+        return None
+
+    marker_path = candidate / PRODUCT_ID_MARKER_FILENAME
+    marker_value = _read_product_marker(root, candidate)
+    if _entry_exists(marker_path) and marker_value != product_key:
+        _remove_stale_registry_mapping(root, product_key, registry)
+        return None
+    return candidate
+
+
+def _remove_stale_registry_mapping(
+    root: Path,
+    product_key: str,
+    registry: ProductIdentityRegistry,
+) -> None:
+    try:
+        registry.remove(root, product_key)
+    except ProductRegistryError as exc:
+        logger.warning("Không thể xóa mapping registry cũ: %s", exc)
+
+
+def _persist_registry_mapping(
+    root: Path,
+    product_key: str,
+    folder: Path,
+    registry: ProductIdentityRegistry,
+) -> None:
+    try:
+        registry.set_folder(root, product_key, folder.name)
+    except ProductRegistryError as exc:
+        raise ProductFolderError(
+            classify_error_code(
+                "PRODUCT_FOLDER_ERROR",
+                stage=ErrorStage.FOLDER,
+                technical_message=str(exc),
+            )
+        ) from exc
+
+
 def ensure_product_folder(
     output_root: str | Path | None,
     product_name: object | None,
     shop_id: object | None = None,
     item_id: object | None = None,
+    *,
+    create_marker: bool = True,
+    registry: ProductIdentityRegistry | None = None,
 ) -> Path:
-    """Resolve or create the unique marker-owned folder for one product."""
+    """Resolve or create one durably owned folder for a product."""
     if output_root is None or not str(output_root).strip():
         raise ProductFolderError(
             "Chưa chọn thư mục đầu ra.",
@@ -441,14 +511,49 @@ def ensure_product_folder(
             error_code="INVALID_PRODUCT_ID",
         ) from exc
 
+    if registry is None and not create_marker:
+        registry = ProductIdentityRegistry()
+
     existing_owned = _discover_owned_folder(root, product_key)
     if existing_owned is not None:
+        if registry is not None:
+            try:
+                _persist_registry_mapping(
+                    root,
+                    product_key,
+                    existing_owned,
+                    registry,
+                )
+            except ProductFolderError as exc:
+                # The valid portable marker remains authoritative proof.
+                logger.warning("Không thể đồng bộ registry từ marker: %s", exc)
         logger.info(
             "Tái sử dụng thư mục sản phẩm: product_key=%s folder=%s",
             product_key,
             existing_owned,
         )
         return existing_owned
+
+    if registry is not None:
+        registry_owned = _registry_owned_folder(root, product_key, registry)
+        if registry_owned is not None:
+            if create_marker:
+                try:
+                    _write_identity_marker_atomic(registry_owned, product_key)
+                except OSError as exc:
+                    raise ProductFolderError(
+                        error_from_exception(
+                            exc,
+                            stage=ErrorStage.FOLDER,
+                            default_code="PRODUCT_FOLDER_ERROR",
+                        )
+                    ) from exc
+            logger.info(
+                "Tái sử dụng thư mục từ registry: product_key=%s folder=%s",
+                product_key,
+                registry_owned,
+            )
+            return registry_owned
 
     component_limit = _folder_component_limit(root)
     folder_name = sanitize_product_folder_name(
@@ -489,30 +594,57 @@ def ensure_product_folder(
             )
         ) from exc
 
-    try:
-        _write_identity_marker_atomic(target, product_key)
-    except ProductFolderError:
+    if create_marker:
+        try:
+            _write_identity_marker_atomic(target, product_key)
+        except ProductFolderError:
+            try:
+                target.rmdir()
+            except OSError:
+                logger.warning(
+                    "Không thể dọn thư mục mới sau lỗi marker: %s", target
+                )
+            raise
+        except OSError as exc:
+            try:
+                target.rmdir()
+            except OSError:
+                logger.warning(
+                    "Không thể dọn thư mục mới sau lỗi marker: %s", target
+                )
+            raise ProductFolderError(
+                error_from_exception(
+                    exc,
+                    stage=ErrorStage.FOLDER,
+                    default_code="PRODUCT_FOLDER_ERROR",
+                )
+            ) from exc
+
+    if registry is not None:
+        try:
+            _persist_registry_mapping(root, product_key, target, registry)
+        except ProductFolderError as exc:
+            if create_marker:
+                # The just-written marker is already durable identity proof.
+                logger.warning("Không thể đồng bộ registry mới: %s", exc)
+            else:
+                try:
+                    target.rmdir()
+                except OSError:
+                    logger.warning(
+                        "Không thể dọn thư mục mới sau lỗi registry: %s",
+                        target,
+                    )
+                raise
+    elif not create_marker:
+        # Defensive: marker-free ownership must always have a registry.
         try:
             target.rmdir()
         except OSError:
-            logger.warning(
-                "Không thể dọn thư mục mới sau lỗi marker: %s", target
-            )
-        raise
-    except OSError as exc:
-        try:
-            target.rmdir()
-        except OSError:
-            logger.warning(
-                "Không thể dọn thư mục mới sau lỗi marker: %s", target
-            )
+            logger.warning("Không thể dọn thư mục chưa có định danh: %s", target)
         raise ProductFolderError(
-            error_from_exception(
-                exc,
-                stage=ErrorStage.FOLDER,
-                default_code="PRODUCT_FOLDER_ERROR",
-            )
-        ) from exc
+            "Không thể thiết lập định danh bền vững cho thư mục sản phẩm."
+        )
 
     logger.info(
         "Đã tạo thư mục sản phẩm: product_key=%s folder=%s",

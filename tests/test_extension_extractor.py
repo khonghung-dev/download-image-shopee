@@ -1615,7 +1615,7 @@ def test_case_e_no_complete_before_timeout_fails_with_product_timeout():
     bg_path = EXTENSION_DIR / "background.js"
     # Reduce timeout for test
     bg_code = bg_path.read_text(encoding="utf-8")
-    bg_code = bg_code.replace("PRODUCT_TIMEOUT_MS = 35000", "PRODUCT_TIMEOUT_MS = 100")
+    bg_code = bg_code.replace("PRODUCT_TIMEOUT_MS = 9000", "PRODUCT_TIMEOUT_MS = 100")
 
     js_test_code = f"""
     const nativePosts = [];

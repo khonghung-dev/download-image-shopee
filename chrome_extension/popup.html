@@ -6,20 +6,21 @@
   <title>Shopee Product Extractor</title>
   <style>
     :root {
-      --primary: #ee4d2d;
-      --primary-hover: #d73211;
-      --bg: #f8f9fa;
-      --card-bg: #ffffff;
-      --text: #1e293b;
-      --text-muted: #64748b;
-      --border: #e2e8f0;
-      --success: #10b981;
-      --warning-bg: #fffbeb;
-      --warning-text: #b45309;
-      --warning-border: #fde68a;
-      --error-bg: #fef2f2;
-      --error-text: #b91c1c;
-      --error-border: #fecaca;
+      --primary: #22d3ee;
+      --primary-hover: #a855f7;
+      --bg: #070b17;
+      --card-bg: #10182b;
+      --card-raised: #151f36;
+      --text: #e6edf7;
+      --text-muted: #8da2c3;
+      --border: #2d4166;
+      --success: #22c55e;
+      --warning-bg: #2c2413;
+      --warning-text: #fcd34d;
+      --warning-border: #785d18;
+      --error-bg: #321722;
+      --error-text: #fda4af;
+      --error-border: #8f2d4a;
     }
 
     * {
@@ -29,40 +30,46 @@
     }
 
     body {
-      width: 360px;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-      background-color: var(--bg);
+      width: 390px;
+      font-family: "Segoe UI Variable", "Segoe UI", -apple-system, BlinkMacSystemFont, sans-serif;
+      background:
+        radial-gradient(circle at 85% -10%, rgba(168, 85, 247, 0.2), transparent 42%),
+        radial-gradient(circle at 5% 20%, rgba(34, 211, 238, 0.12), transparent 36%),
+        var(--bg);
       color: var(--text);
       font-size: 13px;
       line-height: 1.4;
     }
 
     .header {
-      background: linear-gradient(135deg, #ee4d2d 0%, #ff6433 100%);
+      background: linear-gradient(135deg, #111c33 0%, #1d1a40 55%, #321648 100%);
       color: #ffffff;
-      padding: 12px 16px;
+      padding: 14px 16px;
       display: flex;
       align-items: center;
       justify-content: space-between;
-      box-shadow: 0 2px 4px rgba(0,0,0,0.08);
+      border-bottom: 1px solid #3c3470;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.24);
     }
 
     .header h1 {
-      font-size: 15px;
-      font-weight: 600;
+      font-size: 16px;
+      font-weight: 700;
       letter-spacing: -0.2px;
     }
 
     .header .tag {
       font-size: 10px;
-      background: rgba(255, 255, 255, 0.2);
-      padding: 2px 6px;
+      color: #a5f3fc;
+      background: rgba(34, 211, 238, 0.1);
+      border: 1px solid rgba(34, 211, 238, 0.35);
+      padding: 3px 7px;
       border-radius: 10px;
       font-weight: 500;
     }
 
     .content {
-      padding: 14px 16px;
+      padding: 16px;
       display: flex;
       flex-direction: column;
       gap: 12px;
@@ -94,9 +101,9 @@
     .result-card {
       background: var(--card-bg);
       border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 12px;
-      box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+      border-radius: 12px;
+      padding: 14px;
+      box-shadow: 0 10px 24px rgba(0,0,0,0.18);
       display: flex;
       flex-direction: column;
       gap: 10px;
@@ -124,7 +131,7 @@
 
     .field-value.product-title {
       font-weight: 600;
-      color: #0f172a;
+      color: #f8fbff;
       line-height: 1.35;
       max-height: 52px;
       overflow-y: auto;
@@ -134,7 +141,8 @@
       display: grid;
       grid-template-columns: 1fr 1fr;
       gap: 8px;
-      background: #f1f5f9;
+      background: #0b1222;
+      border: 1px solid #263a5d;
       padding: 8px 10px;
       border-radius: 6px;
     }
@@ -143,8 +151,8 @@
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      background: #e0e7ff;
-      color: #3730a3;
+      background: linear-gradient(90deg, #22d3ee, #8b5cf6);
+      color: #ffffff;
       font-weight: 700;
       padding: 2px 8px;
       border-radius: 12px;
@@ -154,12 +162,12 @@
 
     /* Debug section */
     .debug-box {
-      background: #f8fafc;
+      background: #0b1222;
       border: 1px dashed var(--border);
       border-radius: 6px;
       padding: 8px 10px;
       font-size: 11px;
-      color: #475569;
+      color: #9db0cc;
       display: flex;
       flex-direction: column;
       gap: 3px;
@@ -172,21 +180,22 @@
 
     .debug-label {
       font-weight: 600;
-      color: #64748b;
+      color: #7890b4;
     }
 
     .debug-val {
       font-family: monospace;
       font-weight: 600;
-      color: #1e293b;
+      color: #67e8f9;
     }
 
     /* Action button */
     .btn-send {
-      background-color: #2563eb;
+      background: linear-gradient(90deg, #06b6d4 0%, #6366f1 52%, #a855f7 100%);
       color: #ffffff;
       border: none;
-      border-radius: 6px;
+      border: 1px solid #67e8f9;
+      border-radius: 9px;
       padding: 10px 14px;
       font-size: 13px;
       font-weight: 600;
@@ -200,7 +209,7 @@
     }
 
     .btn-send:hover:not(:disabled) {
-      background-color: #1d4ed8;
+      filter: brightness(1.12);
     }
 
     .btn-send:active:not(:disabled) {
@@ -208,7 +217,9 @@
     }
 
     .btn-send:disabled {
-      background-color: #94a3b8;
+      background: #202a3d;
+      border-color: #344158;
+      color: #718096;
       cursor: not-allowed;
       opacity: 0.65;
     }
@@ -238,24 +249,27 @@
     }
 
     .bridge-status-val.status-connected {
-      background: #10b981;
-      color: #ffffff;
+      background: #123d31;
+      color: #86efac;
+      border: 1px solid #22c55e;
     }
 
     .bridge-status-val.status-connecting {
-      background: #f59e0b;
-      color: #ffffff;
+      background: #382b12;
+      color: #fde68a;
+      border: 1px solid #d97706;
     }
 
     .bridge-status-val.status-disconnected {
-      background: rgba(0, 0, 0, 0.25);
-      color: #ffdddd;
+      background: #351824;
+      color: #fda4af;
+      border: 1px solid #9f304d;
     }
 
     .btn-bridge-connect {
-      background: rgba(255, 255, 255, 0.25);
-      border: 1px solid rgba(255, 255, 255, 0.4);
-      color: #ffffff;
+      background: rgba(34, 211, 238, 0.12);
+      border: 1px solid rgba(34, 211, 238, 0.55);
+      color: #a5f3fc;
       font-size: 11px;
       font-weight: 600;
       padding: 2px 8px;
@@ -278,9 +292,9 @@
     }
 
     .bridge-helper-notice {
-      background: #eff6ff;
-      border: 1px solid #bfdbfe;
-      color: #1e40af;
+      background: #10233c;
+      border: 1px solid #256d95;
+      color: #bae6fd;
       padding: 8px 10px;
       border-radius: 6px;
       font-size: 11px;
@@ -295,10 +309,11 @@
     }
 
     .btn-copy {
-      background-color: var(--primary);
+      background: linear-gradient(90deg, #7136d7, #c13eaa);
       color: #ffffff;
       border: none;
-      border-radius: 6px;
+      border: 1px solid #d8b4fe;
+      border-radius: 9px;
       padding: 10px 14px;
       font-size: 13px;
       font-weight: 600;
@@ -312,7 +327,7 @@
     }
 
     .btn-copy:hover {
-      background-color: var(--primary-hover);
+      filter: brightness(1.12);
     }
 
     .btn-copy:active {
@@ -324,10 +339,10 @@
     }
 
     .btn-rescan {
-      background-color: #f1f5f9;
-      color: #334155;
+      background-color: #16233b;
+      color: #a5f3fc;
       border: 1px solid var(--border);
-      border-radius: 6px;
+      border-radius: 9px;
       padding: 10px 12px;
       font-size: 12px;
       font-weight: 600;
@@ -341,8 +356,8 @@
     }
 
     .btn-rescan:hover {
-      background-color: #e2e8f0;
-      color: #0f172a;
+      background-color: #22365a;
+      color: #ffffff;
     }
 
     .btn-rescan:active {
@@ -353,7 +368,7 @@
     .images-section {
       background: var(--card-bg);
       border: 1px solid var(--border);
-      border-radius: 8px;
+      border-radius: 12px;
       overflow: hidden;
     }
 
@@ -369,7 +384,7 @@
       font-weight: 600;
       color: var(--text);
       cursor: pointer;
-      background-color: #f8fafc;
+      background-color: #151f36;
       border-bottom: 1px solid var(--border);
     }
 
@@ -380,7 +395,7 @@
       padding: 10px;
       max-height: 160px;
       overflow-y: auto;
-      background: #fafafa;
+      background: #0b1222;
     }
 
     .gallery-item {
@@ -389,7 +404,7 @@
       border-radius: 4px;
       overflow: hidden;
       border: 1px solid var(--border);
-      background: #ffffff;
+      background: #111a2d;
     }
 
     .gallery-item img {
@@ -414,10 +429,10 @@
       padding: 8px 10px;
       max-height: 120px;
       overflow-y: auto;
-      background: #f1f5f9;
+      background: #090f1c;
       font-family: monospace;
       font-size: 10px;
-      color: #334155;
+      color: #93c5fd;
       border-top: 1px solid var(--border);
       white-space: pre-wrap;
       word-break: break-all;
@@ -436,7 +451,7 @@
     .spinner {
       width: 28px;
       height: 28px;
-      border: 3px solid #e2e8f0;
+      border: 3px solid #263757;
       border-top-color: var(--primary);
       border-radius: 50%;
       animation: spin 0.8s linear infinite;
@@ -444,6 +459,20 @@
 
     @keyframes spin {
       to { transform: rotate(360deg); }
+    }
+
+    ::-webkit-scrollbar {
+      width: 8px;
+      height: 8px;
+    }
+
+    ::-webkit-scrollbar-track {
+      background: #090f1c;
+    }
+
+    ::-webkit-scrollbar-thumb {
+      background: #3a4f78;
+      border-radius: 8px;
     }
 
     .hidden {
@@ -461,7 +490,7 @@
         <button id="btn-connect-bridge" class="btn-bridge-connect" type="button">Kết nối ứng dụng</button>
       </div>
     </div>
-    <span class="tag">Native Messaging Bridge</span>
+    <span class="tag">Extension Companion</span>
   </div>
 
 

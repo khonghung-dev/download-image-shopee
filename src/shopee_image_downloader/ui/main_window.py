@@ -8,6 +8,7 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QCheckBox,
     QFileDialog,
     QFrame,
     QHBoxLayout,
@@ -15,9 +16,9 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
-    QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QSplitter,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -52,6 +53,7 @@ from shopee_image_downloader.ui.presentation import (
     item_state_text,
     item_state_tone,
 )
+from shopee_image_downloader.ui.url_table import UrlTableView
 from shopee_image_downloader.workers.bridge_worker import ExtensionBridgeServer
 from shopee_image_downloader.workers.image_download_worker import (
     ImageDownloadController,
@@ -59,9 +61,9 @@ from shopee_image_downloader.workers.image_download_worker import (
 
 logger = logging.getLogger(__name__)
 
-STATUS_BRIDGE_DISCONNECTED: str = "🔴 Chưa kết nối"
-STATUS_BRIDGE_CONNECTED: str = "🟢 Đã kết nối"
-STATUS_BRIDGE_LOST: str = "🔴 Mất kết nối"
+STATUS_BRIDGE_DISCONNECTED: str = "● Chưa kết nối"
+STATUS_BRIDGE_CONNECTED: str = "● Đã kết nối"
+STATUS_BRIDGE_LOST: str = "● Mất kết nối"
 
 
 class MainWindow(QMainWindow):
@@ -83,7 +85,7 @@ class MainWindow(QMainWindow):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(__app_name__)
-        self.resize(850, 650)
+        self.resize(900, 860)
         self.setMinimumSize(620, 480)
         self.settings_manager = settings_manager or SettingsManager()
         self.bridge_server = bridge_server or ExtensionBridgeServer(parent=self)
@@ -116,6 +118,12 @@ class MainWindow(QMainWindow):
         self.queue_manager.state_changed.connect(self._on_queue_state_changed)
         self.queue_manager.send_open_product_requested.connect(self._on_queue_send_open_product)
         self.queue_manager.send_cancel_requested.connect(self._on_queue_send_cancel)
+        self.queue_manager.pause_download_requested.connect(
+            self._on_queue_pause_download
+        )
+        self.queue_manager.resume_download_requested.connect(
+            self._on_queue_resume_download
+        )
         self.queue_manager.cancel_download_requested.connect(
             self._on_queue_cancel_download
         )
@@ -139,6 +147,9 @@ class MainWindow(QMainWindow):
         self.image_download_controller.progress.connect(
             self._on_image_download_progress
         )
+        paused_signal = getattr(self.image_download_controller, "paused", None)
+        if paused_signal is not None:
+            paused_signal.connect(self._on_image_download_paused)
         metadata_signal = getattr(
             self.image_download_controller,
             "metadata_started",
@@ -171,7 +182,63 @@ class MainWindow(QMainWindow):
         root_layout.setContentsMargins(14, 14, 14, 14)
         root_layout.setSpacing(10)
 
+        header_frame = QFrame(central_widget)
+        header_frame.setObjectName("heroHeader")
+        header_layout = QHBoxLayout(header_frame)
+        header_layout.setContentsMargins(18, 12, 18, 12)
+        title_layout = QVBoxLayout()
+        title_layout.setSpacing(0)
+        app_title = QLabel("Shopee Image Downloader", header_frame)
+        app_title.setProperty("role", "heroTitle")
+        app_subtitle = QLabel("Batch Gallery Downloader", header_frame)
+        app_subtitle.setProperty("role", "heroSubtitle")
+        title_layout.addWidget(app_title)
+        title_layout.addWidget(app_subtitle)
+        header_layout.addLayout(title_layout)
+        header_layout.addStretch(1)
+
+        self.bridge_frame = QFrame(header_frame)
+        self.bridge_frame.setObjectName("bridgeFrame")
+        self.bridge_frame.setProperty("connectionState", "disconnected")
+        bridge_layout = QHBoxLayout(self.bridge_frame)
+        bridge_layout.setContentsMargins(10, 5, 10, 5)
+        bridge_layout.setSpacing(6)
+        self.bridge_title_label = QLabel("Chrome Extension:", self.bridge_frame)
+        self.bridge_title_label.setObjectName("bridgeTitleLabel")
+        bridge_layout.addWidget(self.bridge_title_label)
+        self.bridge_status_label = QLabel(
+            STATUS_BRIDGE_DISCONNECTED,
+            self.bridge_frame,
+        )
+        bridge_layout.addWidget(self.bridge_status_label)
+        header_layout.addWidget(self.bridge_frame)
+        root_layout.addWidget(header_frame)
+
+        self.content_splitter = QSplitter(
+            Qt.Orientation.Vertical,
+            central_widget,
+        )
+        self.content_splitter.setChildrenCollapsible(False)
+        top_pane = QWidget(self.content_splitter)
+        top_layout = QVBoxLayout(top_pane)
+        top_layout.setContentsMargins(0, 0, 0, 0)
+        top_layout.setSpacing(10)
+        bottom_pane = QWidget(self.content_splitter)
+        bottom_layout = QVBoxLayout(bottom_pane)
+        bottom_layout.setContentsMargins(0, 0, 0, 0)
+        bottom_layout.setSpacing(8)
+        self.content_splitter.addWidget(top_pane)
+        self.content_splitter.addWidget(bottom_pane)
+        self.content_splitter.setStretchFactor(0, 3)
+        self.content_splitter.setStretchFactor(1, 2)
+        root_layout.addWidget(self.content_splitter, stretch=1)
+
         # 1. URL input
+        url_card = QFrame(top_pane)
+        url_card.setProperty("role", "card")
+        url_card_layout = QVBoxLayout(url_card)
+        url_card_layout.setContentsMargins(14, 12, 14, 14)
+        url_card_layout.setSpacing(8)
         url_header_layout = QHBoxLayout()
         self.url_label = QLabel("Link sản phẩm Shopee", central_widget)
         self.url_label.setProperty("role", "sectionTitle")
@@ -180,22 +247,28 @@ class MainWindow(QMainWindow):
         self.url_count_label = QLabel("0 link hợp lệ", central_widget)
         self.url_count_label.setObjectName("urlCountLabel")
         url_header_layout.addWidget(self.url_count_label)
-        root_layout.addLayout(url_header_layout)
+        url_card_layout.addLayout(url_header_layout)
 
-        self.url_input = QPlainTextEdit(central_widget)
+        self.url_input = UrlTableView(central_widget)
         self.url_input.setPlaceholderText(
             "Dán link sản phẩm Shopee tại đây, mỗi dòng một link..."
         )
-        self.url_input.setMinimumHeight(82)
+        self.url_input.setMinimumHeight(130)
         self.url_input.setAccessibleName("Link sản phẩm Shopee")
         self.url_input.textChanged.connect(self._update_url_count)
         self.url_label.setBuddy(self.url_input)
-        root_layout.addWidget(self.url_input, stretch=1)
+        url_card_layout.addWidget(self.url_input, stretch=1)
+        top_layout.addWidget(url_card, stretch=1)
 
         # 2. Output folder
+        output_card = QFrame(top_pane)
+        output_card.setProperty("role", "card")
+        output_card_layout = QVBoxLayout(output_card)
+        output_card_layout.setContentsMargins(14, 12, 14, 14)
+        output_card_layout.setSpacing(8)
         self.output_folder_label = QLabel("Thư mục lưu ảnh", central_widget)
         self.output_folder_label.setProperty("role", "sectionTitle")
-        root_layout.addWidget(self.output_folder_label)
+        output_card_layout.addWidget(self.output_folder_label)
 
         folder_layout = QHBoxLayout()
         folder_layout.setSpacing(8)
@@ -214,7 +287,31 @@ class MainWindow(QMainWindow):
         self.select_folder_button.clicked.connect(self.handle_select_folder)
         folder_layout.addWidget(self.select_folder_button)
 
-        root_layout.addLayout(folder_layout)
+        output_card_layout.addLayout(folder_layout)
+
+        options_layout = QHBoxLayout()
+        options_layout.setSpacing(16)
+        self.export_metadata_checkbox = QCheckBox(
+            "Xuất product.json",
+            central_widget,
+        )
+        self.export_marker_checkbox = QCheckBox(
+            "Xuất file .shopee-product-id",
+            central_widget,
+        )
+        option_help = (
+            "Tùy chọn chỉ kiểm soát việc tạo file mới, không xóa file đã có."
+        )
+        self.export_metadata_checkbox.setToolTip(option_help)
+        self.export_marker_checkbox.setToolTip(option_help)
+        self.export_metadata_checkbox.setChecked(False)
+        self.export_marker_checkbox.setChecked(False)
+        options_layout.addWidget(self.export_metadata_checkbox)
+        options_layout.addWidget(self.export_marker_checkbox)
+        options_layout.addStretch(1)
+        output_card_layout.addLayout(options_layout)
+        self.product_json_checkbox = self.export_metadata_checkbox
+        self.identity_marker_checkbox = self.export_marker_checkbox
 
         # 3. Primary and secondary actions, with compact bridge state
         action_layout = QHBoxLayout()
@@ -232,31 +329,24 @@ class MainWindow(QMainWindow):
         self.cancel_button.clicked.connect(self.handle_cancel)
         action_layout.addWidget(self.cancel_button)
 
-        self.continue_button = QPushButton("Tiếp tục", central_widget)
-        self.continue_button.setObjectName("continueButton")
-        self.continue_button.setEnabled(False)
-        self.continue_button.setVisible(False)
-        self.continue_button.clicked.connect(self.handle_continue)
-        action_layout.addWidget(self.continue_button)
+        self.pause_button = QPushButton("Tạm dừng", central_widget)
+        self.pause_button.setObjectName("pauseButton")
+        self.pause_button.setEnabled(False)
+        self.pause_button.clicked.connect(self.handle_pause_resume)
+        action_layout.addWidget(self.pause_button)
+        # Compatibility name for older callers; this is the same single button.
+        self.continue_button = self.pause_button
 
         action_layout.addStretch(1)
-
-        bridge_frame = QFrame(central_widget)
-        bridge_frame.setObjectName("bridgeFrame")
-        bridge_frame.setFrameShape(QFrame.Shape.StyledPanel)
-        bridge_layout = QHBoxLayout(bridge_frame)
-        bridge_layout.setContentsMargins(8, 4, 8, 4)
-        bridge_layout.setSpacing(6)
-        self.bridge_title_label = QLabel("Chrome Extension:", bridge_frame)
-        self.bridge_title_label.setObjectName("bridgeTitleLabel")
-        bridge_layout.addWidget(self.bridge_title_label)
-        self.bridge_status_label = QLabel(STATUS_BRIDGE_DISCONNECTED, bridge_frame)
-        bridge_layout.addWidget(self.bridge_status_label)
-        action_layout.addWidget(bridge_frame)
-
-        root_layout.addLayout(action_layout)
+        output_card_layout.addLayout(action_layout)
+        top_layout.addWidget(output_card)
 
         # 4. Overall batch progress and current-product status
+        progress_card = QFrame(top_pane)
+        progress_card.setProperty("role", "card")
+        progress_card_layout = QVBoxLayout(progress_card)
+        progress_card_layout.setContentsMargins(14, 12, 14, 14)
+        progress_card_layout.setSpacing(8)
         progress_header_layout = QHBoxLayout()
         progress_title = QLabel("Tiến độ batch", central_widget)
         progress_title.setProperty("role", "sectionTitle")
@@ -265,22 +355,46 @@ class MainWindow(QMainWindow):
         self.batch_progress_label = QLabel("Sản phẩm 0/0", central_widget)
         self.batch_progress_label.setObjectName("batchProgressLabel")
         progress_header_layout.addWidget(self.batch_progress_label)
-        root_layout.addLayout(progress_header_layout)
+        progress_card_layout.addLayout(progress_header_layout)
 
         self.progress_bar = QProgressBar(central_widget)
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
-        self.progress_bar.setTextVisible(True)
-        self.progress_bar.setFormat("%p%")
+        self.progress_bar.setTextVisible(False)
         self.progress_bar.setAccessibleName("Tiến độ batch")
-        root_layout.addWidget(self.progress_bar)
+        progress_bar_layout = QHBoxLayout()
+        progress_bar_layout.setSpacing(10)
+        progress_bar_layout.addWidget(self.progress_bar, stretch=1)
+        self.progress_percent_label = QLabel("0%", central_widget)
+        self.progress_percent_label.setObjectName("progressPercentLabel")
+        self.progress_percent_label.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        self.progress_percent_label.setMinimumWidth(
+            self.progress_percent_label.fontMetrics().horizontalAdvance("100%")
+            + 8
+        )
+        self.progress_bar.valueChanged.connect(
+            lambda value: self.progress_percent_label.setText(f"{value}%")
+        )
+        progress_bar_layout.addWidget(self.progress_percent_label)
+        progress_card_layout.addLayout(progress_bar_layout)
 
         self.current_product_label = QLabel("Chưa bắt đầu xử lý.", central_widget)
         self.current_product_label.setObjectName("currentProductLabel")
         self.current_product_label.setWordWrap(True)
-        root_layout.addWidget(self.current_product_label)
+        progress_card_layout.addWidget(self.current_product_label)
+        top_layout.addWidget(progress_card)
 
         # 5. Product results
+        results_card = QFrame(bottom_pane)
+        results_card.setProperty("role", "card")
+        results_card_layout = QVBoxLayout(results_card)
+        results_card_layout.setContentsMargins(14, 12, 14, 14)
+        results_card_layout.setSpacing(8)
+        results_title = QLabel("Kết quả", results_card)
+        results_title.setProperty("role", "sectionTitle")
+        results_card_layout.addWidget(results_title)
         self.results_table = QTableWidget(central_widget)
         self.results_table.setColumnCount(len(self.TABLE_HEADERS))
         self.results_table.setHorizontalHeaderLabels(self.TABLE_HEADERS)
@@ -292,6 +406,7 @@ class MainWindow(QMainWindow):
         self.results_table.setWordWrap(False)
         self.results_table.setTextElideMode(Qt.TextElideMode.ElideRight)
         self.results_table.verticalHeader().setVisible(False)
+        self.results_table.verticalHeader().setDefaultSectionSize(32)
         self.results_table.setAccessibleName("Kết quả sản phẩm")
         self.results_table.setMinimumHeight(145)
 
@@ -315,7 +430,7 @@ class MainWindow(QMainWindow):
         )
         self.results_table.setColumnWidth(self.COL_STATUS, 220)
 
-        root_layout.addWidget(self.results_table, stretch=3)
+        results_card_layout.addWidget(self.results_table, stretch=1)
 
         # 6. Final status / summary
         self.status_label = QLabel(
@@ -325,14 +440,17 @@ class MainWindow(QMainWindow):
         self.status_label.setObjectName("summaryLabel")
         self.status_label.setWordWrap(True)
         self.status_label.setProperty("statusTone", StatusTone.NEUTRAL.value)
-        root_layout.addWidget(self.status_label)
+        results_card_layout.addWidget(self.status_label)
+        bottom_layout.addWidget(results_card, stretch=1)
+
+        self.content_splitter.setSizes([600, 200])
 
         self.setCentralWidget(central_widget)
         QWidget.setTabOrder(self.url_input, self.select_folder_button)
         QWidget.setTabOrder(self.select_folder_button, self.start_button)
         QWidget.setTabOrder(self.start_button, self.cancel_button)
-        QWidget.setTabOrder(self.cancel_button, self.continue_button)
-        QWidget.setTabOrder(self.continue_button, self.results_table)
+        QWidget.setTabOrder(self.cancel_button, self.pause_button)
+        QWidget.setTabOrder(self.pause_button, self.results_table)
         self._update_url_count()
         self._update_output_path_tooltip()
 
@@ -400,6 +518,8 @@ class MainWindow(QMainWindow):
         state = self.queue_manager.state
         queue_active = state in {
             QueueState.RUNNING,
+            QueueState.PAUSE_REQUESTED,
+            QueueState.PAUSED_USER,
             QueueState.PAUSED_VERIFICATION,
             QueueState.CANCELLING,
         }
@@ -412,17 +532,51 @@ class MainWindow(QMainWindow):
         )
         self.cancel_button.setEnabled(
             not self._close_requested
-            and state in {QueueState.RUNNING, QueueState.PAUSED_VERIFICATION}
+            and state
+            in {
+                QueueState.RUNNING,
+                QueueState.PAUSE_REQUESTED,
+                QueueState.PAUSED_USER,
+                QueueState.PAUSED_VERIFICATION,
+            }
         )
-        verification = state == QueueState.PAUSED_VERIFICATION
-        self.continue_button.setVisible(verification)
-        self.continue_button.setEnabled(
-            verification and not self._close_requested
+        pause_text = "Tạm dừng"
+        pause_enabled = state == QueueState.RUNNING
+        if state == QueueState.PAUSE_REQUESTED:
+            pause_text = "Đang tạm dừng..."
+            pause_enabled = False
+        elif state == QueueState.PAUSED_USER:
+            pause_text = "Tiếp tục"
+            pause_enabled = True
+        elif state == QueueState.PAUSED_VERIFICATION:
+            pause_text = "Tiếp tục sau xác minh"
+            pause_enabled = True
+        self.pause_button.setText(pause_text)
+        self.pause_button.setEnabled(
+            pause_enabled and not self._close_requested
         )
         input_enabled = not controls_locked and not self._close_requested
         self.url_input.setEnabled(input_enabled)
         self.output_folder_input.setEnabled(input_enabled)
         self.select_folder_button.setEnabled(input_enabled)
+        self.export_metadata_checkbox.setEnabled(input_enabled)
+        self.export_marker_checkbox.setEnabled(input_enabled)
+
+    def _configure_worker_output_options(self) -> bool:
+        """Snapshot the two optional-output flags before starting a worker."""
+        configure = getattr(
+            self.image_download_controller,
+            "set_output_options",
+            None,
+        )
+        if not callable(configure):
+            return True
+        return bool(
+            configure(
+                export_metadata=self.export_metadata_checkbox.isChecked(),
+                export_identity_marker=self.export_marker_checkbox.isChecked(),
+            )
+        )
 
     def _populate_result_rows(
         self,
@@ -580,15 +734,23 @@ class MainWindow(QMainWindow):
         self.cancel_button.setEnabled(False)
         self.queue_manager.cancel_batch()
 
-    def handle_continue(self) -> None:
-        """Resume only the existing verification-paused queue item."""
-        if (
-            self._close_requested
-            or self.queue_manager.state != QueueState.PAUSED_VERIFICATION
-        ):
+    def handle_pause_resume(self) -> None:
+        """Run the one state-aware Pause/Resume/Continue action."""
+        if self._close_requested:
             return
-        self.continue_button.setEnabled(False)
-        self.queue_manager.resume_verification()
+        state = self.queue_manager.state
+        if state == QueueState.RUNNING:
+            self.queue_manager.request_user_pause()
+        elif state == QueueState.PAUSED_USER:
+            self.pause_button.setEnabled(False)
+            self.queue_manager.resume_user_pause()
+        elif state == QueueState.PAUSED_VERIFICATION:
+            self.pause_button.setEnabled(False)
+            self.queue_manager.resume_verification()
+
+    def handle_continue(self) -> None:
+        """Compatibility slot routed through the single pause/resume button."""
+        self.handle_pause_resume()
 
     def _on_queue_state_changed(self, new_state_str: str) -> None:
         """Reflect the authoritative queue state in all processing controls."""
@@ -596,6 +758,12 @@ class MainWindow(QMainWindow):
         self._refresh_controls()
         if state == QueueState.CANCELLING:
             self.current_product_label.setText("Đang hủy an toàn...")
+        elif state == QueueState.PAUSE_REQUESTED:
+            self.current_product_label.setText(
+                "Đang hoàn tất bước hiện tại để tạm dừng an toàn..."
+            )
+        elif state == QueueState.PAUSED_USER:
+            self.current_product_label.setText("Đã tạm dừng.")
 
     def _on_queue_send_open_product(self, request_id: str, url: str) -> None:
         """Send open_product message to Chrome Extension via bridge."""
@@ -617,6 +785,18 @@ class MainWindow(QMainWindow):
     def _on_queue_cancel_download(self, request_id: str) -> None:
         """Cooperatively stop only the worker owned by this request."""
         self.image_download_controller.cancel(request_id)
+
+    def _on_queue_pause_download(self, request_id: str) -> None:
+        """Request the worker's next cooperative image boundary."""
+        pause = getattr(self.image_download_controller, "pause", None)
+        if callable(pause):
+            pause(request_id)
+
+    def _on_queue_resume_download(self, request_id: str) -> None:
+        """Wake the same worker after a cooperative user pause."""
+        resume = getattr(self.image_download_controller, "resume", None)
+        if callable(resume):
+            resume(request_id)
 
     def _on_bridge_process_progress_received(self, request_id: str, stage: str) -> None:
         """Forward process progress message from bridge to queue manager."""
@@ -709,7 +889,8 @@ class MainWindow(QMainWindow):
             status_tone=item_state_tone(ItemState.CREATING_FOLDER),
         )
         try:
-            started = self.image_download_controller.start(
+            configured = self._configure_worker_output_options()
+            started = configured and self.image_download_controller.start(
                 product_data,
                 self.output_folder_input.text().strip(),
             )
@@ -909,6 +1090,14 @@ class MainWindow(QMainWindow):
                 f"Đang tải ảnh {index}/{total} — {product_data.product_name}"
             )
 
+    def _on_image_download_paused(
+        self,
+        product_data: BridgeProductData,
+    ) -> None:
+        """Forward a worker-confirmed safe pause boundary to its queue owner."""
+        if self.queue_manager.is_known_request(product_data.request_id):
+            self.queue_manager.handle_download_paused(product_data)
+
     def _on_metadata_started(self, product_data: BridgeProductData) -> None:
         """Present the existing product.json phase without changing its policy."""
         if self.queue_manager.is_known_request(product_data.request_id):
@@ -1040,12 +1229,15 @@ class MainWindow(QMainWindow):
         """Update Chrome Extension connection state in the UI."""
         if connected:
             self._bridge_has_connected_before = True
-            self.bridge_status_label.setText(STATUS_BRIDGE_CONNECTED)
+            status_text = STATUS_BRIDGE_CONNECTED
+            connection_state = "connected"
         else:
             if self._bridge_has_connected_before:
-                self.bridge_status_label.setText(STATUS_BRIDGE_LOST)
+                status_text = STATUS_BRIDGE_LOST
+                connection_state = "lost"
             else:
-                self.bridge_status_label.setText(STATUS_BRIDGE_DISCONNECTED)
+                status_text = STATUS_BRIDGE_DISCONNECTED
+                connection_state = "disconnected"
             current = self.queue_manager.current_item
             if (
                 self.queue_manager.state == QueueState.RUNNING
@@ -1059,6 +1251,11 @@ class MainWindow(QMainWindow):
                     "BRIDGE_DISCONNECTED",
                     "Native Host/Extension bridge disconnected",
                 )
+        self.bridge_status_label.setText(status_text)
+        self.bridge_frame.setProperty("connectionState", connection_state)
+        style = self.bridge_frame.style()
+        style.unpolish(self.bridge_frame)
+        style.polish(self.bridge_frame)
 
     def _on_bridge_error(self, error_message: str) -> None:
         """Handle errors reported by the WebSocket bridge."""
@@ -1185,7 +1382,8 @@ class MainWindow(QMainWindow):
             status_tone=StatusTone.ACTIVE,
         )
         try:
-            started = self.image_download_controller.start(
+            configured = self._configure_worker_output_options()
+            started = configured and self.image_download_controller.start(
                 product_data,
                 self.output_folder_input.text().strip(),
             )
